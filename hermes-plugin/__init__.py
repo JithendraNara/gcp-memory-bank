@@ -235,7 +235,7 @@ class GcpMemoryBankProvider(MemoryProvider):
         """Return Memory Bank config per official docs."""
         return {
             "generation_config": {
-                "model": f"projects/{self._project_id}/locations/{self._location}/publishers/google/models/gemini-3.1-pro-preview",
+                "model": f"projects/{self._project_id}/locations/{self._location}/publishers/google/models/gemini-2.5-flash",
             },
             "similarity_search_config": {
                 "embedding_model": f"projects/{self._project_id}/locations/{self._location}/publishers/google/models/text-embedding-005",
