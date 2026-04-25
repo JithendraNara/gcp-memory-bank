@@ -412,7 +412,90 @@ class GcpMemoryBankProvider(MemoryProvider):
                     "consolidation_config": {
                         "revisions_per_candidate_count": 1
                     },
-                    "generate_memories_examples": [],
+                    "generate_memories_examples": [
+                        {
+                            "conversationSource": {
+                                "events": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [{"text": "Hey! What can I help you with today?"}]
+                                        }
+                                    },
+                                    {
+                                        "content": {
+                                            "role": "user",
+                                            "parts": [{"text": "I just moved to Fort Wayne, Indiana. Still getting used to the area."}]
+                                        }
+                                    }
+                                ]
+                            },
+                            "generatedMemories": [
+                                {"fact": "The user lives in Fort Wayne, Indiana."}
+                            ]
+                        },
+                        {
+                            "conversationSource": {
+                                "events": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [{"text": "Want me to use the latest Gemini model for this task?"}]
+                                        }
+                                    },
+                                    {
+                                        "content": {
+                                            "role": "user",
+                                            "parts": [{"text": "Yes, always use the newest available model. I don't care about cost."}]
+                                        }
+                                    }
+                                ]
+                            },
+                            "generatedMemories": [
+                                {"fact": "The user prefers using the newest available AI models regardless of cost."}
+                            ]
+                        },
+                        {
+                            "conversationSource": {
+                                "events": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [{"text": "Got it. Any other preferences I should know about?"}]
+                                        }
+                                    },
+                                    {
+                                        "content": {
+                                            "role": "user",
+                                            "parts": [{"text": "Remember to always follow official docs first. Don't make up your own rules."}]
+                                        }
+                                    }
+                                ]
+                            },
+                            "generatedMemories": [
+                                {"fact": "The user explicitly instructed the agent to always follow official documentation first and not invent its own rules."}
+                            ]
+                        },
+                        {
+                            "conversationSource": {
+                                "events": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [{"text": "Here's the weather forecast for Fort Wayne: sunny, 72°F."}]
+                                        }
+                                    },
+                                    {
+                                        "content": {
+                                            "role": "user",
+                                            "parts": [{"text": "Thanks, that's helpful."}]
+                                        }
+                                    }
+                                ]
+                            },
+                            "generatedMemories": []
+                        }
+                    ],
                     "enable_third_person_memories": False
                 }
             ],
