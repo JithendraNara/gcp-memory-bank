@@ -469,6 +469,10 @@ class GcpMemoryBankProvider(MemoryProvider):
             scope["session_id"] = self._session_id
         return scope
 
+    def _retrieval_scope(self) -> Dict[str, str]:
+        """User-scoped retrieval (no session_id) so memories survive across sessions."""
+        return {"app_name": self._app_name, "user_id": self._user_id}
+
     # -----------------------------------------------------------------------
     # Prefetch (retrieval only, per docs)
     # -----------------------------------------------------------------------
@@ -492,7 +496,7 @@ class GcpMemoryBankProvider(MemoryProvider):
                 from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
                 request = RetrieveMemoriesRequest(
                     parent=self._parent,
-                    scope=self._scope(),
+                    scope=self._retrieval_scope(),
                     similarity_search_params={"search_query": query, "top_k": 8},
                 )
                 response = client.retrieve_memories(request=request)
@@ -567,7 +571,7 @@ class GcpMemoryBankProvider(MemoryProvider):
                 client.agent_engines.memories.generate(
                     name=engine_name,
                     direct_contents_source={"events": events},
-                    scope=self._scope(),
+                    scope=self._retrieval_scope(),
                     config={"wait_for_completion": False},
                 )
                 self._record_success()
@@ -610,7 +614,7 @@ class GcpMemoryBankProvider(MemoryProvider):
             try:
                 client = self._get_client()
                 from google.cloud.aiplatform_v1beta1.types import memory_bank as mb_types
-                mem = mb_types.Memory(fact=fact, scope=self._scope())
+                mem = mb_types.Memory(fact=fact, scope=self._retrieval_scope())
                 op = client.create_memory(parent=self._parent, memory=mem)
                 op.result(timeout=30)
                 self._record_success()
@@ -644,7 +648,7 @@ class GcpMemoryBankProvider(MemoryProvider):
                 from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
                 request = RetrieveMemoriesRequest(
                     parent=self._parent,
-                    scope=self._scope(),
+                    scope=self._retrieval_scope(),
                 )
                 response = client.retrieve_memories(request=request)
                 memories = []
@@ -673,7 +677,7 @@ class GcpMemoryBankProvider(MemoryProvider):
                     engine_name = f"projects/{self._project_id}/locations/{self._location}/reasoningEngines/{self._engine_id}"
                     results = vclient.agent_engines.memories.retrieve(
                         name=engine_name,
-                        scope=self._scope(),
+                        scope=self._retrieval_scope(),
                         similarity_search_params={"search_query": query, "top_k": top_k},
                         config={"filter": filter_str},
                     )
@@ -683,7 +687,7 @@ class GcpMemoryBankProvider(MemoryProvider):
                     from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
                     request = RetrieveMemoriesRequest(
                         parent=self._parent,
-                        scope=self._scope(),
+                        scope=self._retrieval_scope(),
                         similarity_search_params={"search_query": query, "top_k": top_k},
                     )
                     response = client.retrieve_memories(request=request)
@@ -709,7 +713,6 @@ class GcpMemoryBankProvider(MemoryProvider):
                     import vertexai
                     vclient = self._get_vertex_client()
                     engine_name = f"projects/{self._project_id}/locations/{self._location}/reasoningEngines/{self._engine_id}"
-                    # Convert plain dict to proper MemoryMetadataValue objects
                     typed_metadata = {}
                     for k, v in metadata.items():
                         if isinstance(v, dict):
@@ -719,12 +722,12 @@ class GcpMemoryBankProvider(MemoryProvider):
                     op = vclient.agent_engines.memories.create(
                         name=engine_name,
                         fact=fact,
-                        scope=self._scope(),
+                        scope=self._retrieval_scope(),
                         config={"metadata": typed_metadata},
                     )
                     name = op.response.name if op.done else ""
                 else:
-                    mem = mb_types.Memory(fact=fact, scope=self._scope())
+                    mem = mb_types.Memory(fact=fact, scope=self._retrieval_scope())
                     op = client.create_memory(parent=self._parent, memory=mem)
                     created = op.result(timeout=60)
                     name = created.name
