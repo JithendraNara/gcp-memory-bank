@@ -3,8 +3,11 @@
 Uses Google Cloud Memory Bank via the official Agent Platform SDK.
 Follows the patterns documented at:
   https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/setup
+  https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/ingest-events
   https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/generate-memories
   https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/fetch-memories
+  https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/revisions
+  https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin
 
 Config via environment variables:
   GCP_PROJECT_ID      — GCP project (default: festive-antenna-463514-m8)
@@ -69,13 +72,15 @@ SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
         "Search GCP Memory Bank by semantic similarity. Returns relevant facts "
-        "ranked by relevance (Euclidean distance). Use for targeted recall mid-conversation."
+        "ranked by relevance (Euclidean distance). Use for targeted recall mid-conversation. "
+        "Optional filter string supports system field filtering (e.g. topics, create_time)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "top_k": {"type": "integer", "description": "Max results (default: 10, max: 50)."},
+            "filter": {"type": "string", "description": "Optional system field filter string (EBNF syntax)."},
         },
         "required": ["query"],
     },
@@ -85,14 +90,35 @@ STORE_SCHEMA = {
     "name": "memory_store",
     "description": (
         "Store a durable fact about the user in GCP Memory Bank. "
-        "Stored verbatim (no LLM extraction). Use for explicit preferences, corrections, or decisions."
+        "Stored verbatim (no LLM extraction). Use for explicit preferences, corrections, or decisions. "
+        "Optional metadata can be attached for later filtering."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "fact": {"type": "string", "description": "The fact to store."},
+            "metadata": {
+                "type": "object",
+                "description": "Optional structured metadata as key-value pairs for filtering.",
+            },
         },
         "required": ["fact"],
+    },
+}
+
+REVISIONS_SCHEMA = {
+    "name": "memory_revisions",
+    "description": (
+        "List the revision history of a specific memory. "
+        "Shows how a memory evolved over time (created, updated, deleted). "
+        "Requires the memory name returned by memory_search or memory_store."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_name": {"type": "string", "description": "Full memory resource name (e.g. projects/.../memories/...)"},
+        },
+        "required": ["memory_name"],
     },
 }
 
@@ -123,6 +149,7 @@ class GcpMemoryBankProvider(MemoryProvider):
     def __init__(self):
         self._config: Optional[dict] = None
         self._client: Optional[Any] = None
+        self._vclient: Optional[Any] = None
         self._client_lock = threading.Lock()
         self._project_id = ""
         self._location = ""
@@ -154,14 +181,16 @@ class GcpMemoryBankProvider(MemoryProvider):
         cfg = _load_config()
         if not cfg.get("project_id"):
             return False
-        try:
-            from google.auth import default as google_auth_default
-            creds, project = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            if not creds or not project:
-                return False
-        except Exception:
-            return False
-        return True
+        # Check for GCP credentials locally — do NOT make network calls
+        # per Hermes contract. Accept service account JSON or gcloud ADC.
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if creds_path and os.path.isfile(creds_path):
+            return True
+        # Default gcloud ADC path
+        default_adc = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
+        if os.path.isfile(default_adc):
+            return True
+        return False
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
@@ -217,6 +246,20 @@ class GcpMemoryBankProvider(MemoryProvider):
                 "Pausing API calls for %ds.",
                 self._consecutive_failures, _BREAKER_COOLDOWN_SECS,
             )
+
+    def _get_vertex_client(self):
+        """Return a cached vertexai.Client.
+
+        Creates once per provider instance to avoid repeated initialization overhead.
+        """
+        if self._vclient is not None:
+            return self._vclient
+        with self._client_lock:
+            if self._vclient is not None:
+                return self._vclient
+            import vertexai
+            self._vclient = vertexai.Client(project=self._project_id, location=self._location)
+            return self._vclient
 
     def _get_client(self):
         with self._client_lock:
@@ -386,6 +429,8 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._engine_id = self._config.get("engine_id", "")
         self._user_id = kwargs.get("user_id") or "hermes-user"
         self._app_name = kwargs.get("agent_identity") or "hermes"
+        self._agent_context = kwargs.get("agent_context", "primary")
+        self._session_id = session_id
         self._initialized = True
         if self._engine_id:
             self._parent = (
@@ -393,24 +438,36 @@ class GcpMemoryBankProvider(MemoryProvider):
                 f"/reasoningEngines/{self._engine_id}"
             )
             logger.info(
-                "GCP Memory Bank initialized: project=%s location=%s engine=%s user=%s app=%s",
-                self._project_id, self._location, self._engine_id, self._user_id, self._app_name,
+                "GCP Memory Bank initialized: project=%s location=%s engine=%s user=%s app=%s context=%s",
+                self._project_id, self._location, self._engine_id, self._user_id, self._app_name, self._agent_context,
             )
         else:
             self._ensure_engine()
             self._config = _load_config()
-            self._engine_id = self._config.get("engine_id", "")
+            # Preserve engine_id from _ensure_engine even if config file write failed
+            if not self._engine_id:
+                self._engine_id = self._config.get("engine_id", "")
+            # Ensure parent is set if engine_id was recovered from config
+            if self._engine_id and not self._parent:
+                self._parent = (
+                    f"projects/{self._project_id}/locations/{self._location}"
+                    f"/reasoningEngines/{self._engine_id}"
+                )
 
     def system_prompt_block(self) -> str:
         return (
             "# GCP Memory Bank\n"
             f"Active. Engine: {self._engine_id}. User: {self._user_id}.\n"
             "Use memory_search to find facts, memory_store to save preferences, "
-            "memory_profile for a full overview, memory_purge to delete all user data."
+            "memory_profile for a full overview, memory_revisions to inspect history, "
+            "memory_purge to delete all user data."
         )
 
     def _scope(self) -> Dict[str, str]:
-        return {"app_name": self._app_name, "user_id": self._user_id}
+        scope = {"app_name": self._app_name, "user_id": self._user_id}
+        if self._session_id:
+            scope["session_id"] = self._session_id
+        return scope
 
     # -----------------------------------------------------------------------
     # Prefetch (retrieval only, per docs)
@@ -458,20 +515,27 @@ class GcpMemoryBankProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Buffer conversation events. Memory generation happens at session end."""
+        if self._agent_context != "primary":
+            return
         with self._events_lock:
-            self._events.append({
-                "content": {
-                    "role": "model",
-                    "parts": [{"text": assistant_content}]
-                }
-            })
+            # Chronological order: user first, then assistant
             self._events.append({
                 "content": {
                     "role": "user",
                     "parts": [{"text": user_content}]
                 }
             })
+            self._events.append({
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": assistant_content}]
+                }
+            })
             self._turn_count += 1
+            # Cap event buffer to prevent unbounded growth in long sessions
+            # Max ~50 turns = 100 events
+            if len(self._events) > 200:
+                self._events = self._events[-200:]
 
     # -----------------------------------------------------------------------
     # Session end: generate memories via official API (per docs)
@@ -483,6 +547,8 @@ class GcpMemoryBankProvider(MemoryProvider):
         Per docs: https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/generate-memories
         Uses direct_contents_source with wait_for_completion=False for background processing.
         """
+        if self._agent_context != "primary":
+            return
         if self._is_breaker_open():
             return
         with self._events_lock:
@@ -512,12 +578,54 @@ class GcpMemoryBankProvider(MemoryProvider):
 
         threading.Thread(target=_generate, daemon=True, name="gcp-mb-generate").start()
 
+    def shutdown(self) -> None:
+        """Clean shutdown — close the gRPC client connection."""
+        with self._client_lock:
+            if self._client is not None:
+                try:
+                    self._client.transport.close()
+                except Exception:
+                    pass
+                self._client = None
+            if self._vclient is not None:
+                try:
+                    self._vclient.transport.close()
+                except Exception:
+                    pass
+                self._vclient = None
+
+    def on_memory_write(self, action: str, target: str, content: str) -> None:
+        """Mirror built-in memory writes to Memory Bank.
+
+        When the agent edits MEMORY.md or USER.md, we also store the fact
+        in Memory Bank so it survives profile changes.
+        """
+        if self._agent_context != "primary":
+            return
+        if self._is_breaker_open():
+            return
+        fact = f"[{action.upper()} {target}] {content}"
+
+        def _write():
+            try:
+                client = self._get_client()
+                from google.cloud.aiplatform_v1beta1.types import memory_bank as mb_types
+                mem = mb_types.Memory(fact=fact, scope=self._scope())
+                op = client.create_memory(parent=self._parent, memory=mem)
+                op.result(timeout=30)
+                self._record_success()
+            except Exception as e:
+                self._record_failure()
+                logger.debug("on_memory_write failed: %s", e)
+
+        threading.Thread(target=_write, daemon=True, name="gcp-mb-write").start()
+
     # -----------------------------------------------------------------------
-    # Tools
+    # Tool schemas
     # -----------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, STORE_SCHEMA, PURGE_SCHEMA]
+        return [PROFILE_SCHEMA, SEARCH_SCHEMA, STORE_SCHEMA, REVISIONS_SCHEMA, PURGE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -533,11 +641,15 @@ class GcpMemoryBankProvider(MemoryProvider):
 
         if tool_name == "memory_profile":
             try:
+                from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
+                request = RetrieveMemoriesRequest(
+                    parent=self._parent,
+                    scope=self._scope(),
+                )
+                response = client.retrieve_memories(request=request)
                 memories = []
-                for m in client.list_memories(parent=self._parent):
-                    scope = dict(m.scope) if m.scope else {}
-                    if scope.get("user_id") == self._user_id and scope.get("app_name") == self._app_name:
-                        memories.append(m.fact)
+                for r in response.retrieved_memories:
+                    memories.append(r.memory.fact)
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
@@ -551,17 +663,32 @@ class GcpMemoryBankProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             top_k = min(int(args.get("top_k", 10)), 50)
+            filter_str = args.get("filter", "")
             try:
                 memories = []
-                from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
-                request = RetrieveMemoriesRequest(
-                    parent=self._parent,
-                    scope=self._scope(),
-                    similarity_search_params={"search_query": query, "top_k": top_k},
-                )
-                response = client.retrieve_memories(request=request)
-                for r in response.retrieved_memories:
-                    memories.append({"fact": r.memory.fact, "distance": r.distance, "name": r.memory.name})
+                if filter_str:
+                    # System field filtering requires high-level vertexai.Client
+                    # per fetch-memories doc (low-level proto lacks filter field).
+                    vclient = self._get_vertex_client()
+                    engine_name = f"projects/{self._project_id}/locations/{self._location}/reasoningEngines/{self._engine_id}"
+                    results = vclient.agent_engines.memories.retrieve(
+                        name=engine_name,
+                        scope=self._scope(),
+                        similarity_search_params={"search_query": query, "top_k": top_k},
+                        config={"filter": filter_str},
+                    )
+                    for r in results:
+                        memories.append({"fact": r.memory.fact, "distance": r.distance, "name": r.memory.name})
+                else:
+                    from google.cloud.aiplatform_v1beta1.types.memory_bank_service import RetrieveMemoriesRequest
+                    request = RetrieveMemoriesRequest(
+                        parent=self._parent,
+                        scope=self._scope(),
+                        similarity_search_params={"search_query": query, "top_k": top_k},
+                    )
+                    response = client.retrieve_memories(request=request)
+                    for r in response.retrieved_memories:
+                        memories.append({"fact": r.memory.fact, "distance": r.distance, "name": r.memory.name})
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No relevant memories found."})
@@ -574,24 +701,73 @@ class GcpMemoryBankProvider(MemoryProvider):
             fact = args.get("fact", "")
             if not fact:
                 return tool_error("Missing required parameter: fact")
+            metadata = args.get("metadata") or {}
             try:
-                mem = mb_types.Memory(fact=fact, scope=self._scope())
-                op = client.create_memory(parent=self._parent, memory=mem)
-                created = op.result(timeout=60)
+                if metadata:
+                    # Metadata requires high-level vertexai.Client
+                    # per fetch-memories doc (low-level proto doesn't expose metadata fields).
+                    import vertexai
+                    vclient = self._get_vertex_client()
+                    engine_name = f"projects/{self._project_id}/locations/{self._location}/reasoningEngines/{self._engine_id}"
+                    # Convert plain dict to proper MemoryMetadataValue objects
+                    typed_metadata = {}
+                    for k, v in metadata.items():
+                        if isinstance(v, dict):
+                            typed_metadata[k] = vertexai.types.MemoryMetadataValue(**v)
+                        else:
+                            typed_metadata[k] = vertexai.types.MemoryMetadataValue(string_value=str(v))
+                    op = vclient.agent_engines.memories.create(
+                        name=engine_name,
+                        fact=fact,
+                        scope=self._scope(),
+                        config={"metadata": typed_metadata},
+                    )
+                    name = op.response.name if op.done else ""
+                else:
+                    mem = mb_types.Memory(fact=fact, scope=self._scope())
+                    op = client.create_memory(parent=self._parent, memory=mem)
+                    created = op.result(timeout=60)
+                    name = created.name
                 self._record_success()
-                return json.dumps({"result": "Fact stored.", "name": created.name})
+                return json.dumps({"result": "Fact stored.", "name": name})
             except Exception as e:
                 self._record_failure()
                 return tool_error(f"Failed to store: {e}")
 
+        elif tool_name == "memory_revisions":
+            memory_name = args.get("memory_name", "")
+            if not memory_name:
+                return tool_error("Missing required parameter: memory_name")
+            try:
+                vclient = self._get_vertex_client()
+                revisions = []
+                for rev in vclient.agent_engines.memories.revisions.list(name=memory_name):
+                    revisions.append({
+                        "name": rev.name,
+                        "fact": rev.fact,
+                        "create_time": rev.create_time.isoformat() if hasattr(rev, "create_time") and rev.create_time else None,
+                    })
+                self._record_success()
+                if not revisions:
+                    return json.dumps({"result": "No revisions found for this memory."})
+                return json.dumps({"revisions": revisions, "count": len(revisions)})
+            except Exception as e:
+                self._record_failure()
+                return tool_error(f"Failed to list revisions: {e}")
+
         elif tool_name == "memory_purge":
             try:
                 deleted = 0
-                for m in client.list_memories(parent=self._parent):
+                vclient = self._get_vertex_client()
+                engine_name = (
+                    f"projects/{self._project_id}/locations/{self._location}"
+                    f"/reasoningEngines/{self._engine_id}"
+                )
+                for m in vclient.agent_engines.memories.list(name=engine_name):
                     scope = dict(m.scope) if m.scope else {}
                     if scope.get("user_id") == self._user_id and scope.get("app_name") == self._app_name:
                         try:
-                            client.delete_memory(name=m.name)
+                            vclient.agent_engines.memories.delete(name=m.name)
                             deleted += 1
                         except Exception:
                             pass
@@ -602,3 +778,8 @@ class GcpMemoryBankProvider(MemoryProvider):
                 return tool_error(f"Purge failed: {e}")
 
         return tool_error(f"Unknown tool: {tool_name}")
+
+
+def register(ctx) -> None:
+    """Register GCP Memory Bank as a memory provider plugin."""
+    ctx.register_memory_provider(GcpMemoryBankProvider())

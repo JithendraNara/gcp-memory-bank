@@ -1,7 +1,10 @@
 name: gcp-memory-bank
-description: Google Cloud Memory Bank for persistent cross-session agent memory
-version: 0.1.0
-author: Jithendra Nara
-requires:
-  - google-adk
-  - google-cloud-aiplatform>=1.93
+version: 1.0.0
+description: "Google Cloud Memory Bank — managed LLM-powered memory with extraction, consolidation, and semantic search via Gemini Enterprise Agent Platform."
+pip_dependencies:
+  - google-cloud-aiplatform>=1.148.0
+  - google-genai>=1.73.0
+requires_env: []
+hooks:
+  - on_session_end
+  - on_memory_write
