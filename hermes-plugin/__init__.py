@@ -390,7 +390,18 @@ class GcpMemoryBankProvider(MemoryProvider):
         config = {
             "display_name": f"hermes-memory-{self._app_name}",
             "context_spec": {
-                "memory_bank_config": {},
+                "memory_bank_config": {
+                    "generation_config": {
+                        "model": "projects/{}/locations/{}/publishers/google/models/gemini-3.1-pro-preview".format(
+                            self._project_id, self._location
+                        ),
+                    },
+                    "similarity_search_config": {
+                        "embedding_model": "projects/{}/locations/{}/publishers/google/models/gemini-embedding-001".format(
+                            self._project_id, self._location
+                        ),
+                    },
+                },
             },
         }
         engine = client.agent_engines.create(config=config)
