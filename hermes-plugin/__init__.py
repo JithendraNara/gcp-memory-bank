@@ -387,21 +387,42 @@ class GcpMemoryBankProvider(MemoryProvider):
 
         client = vertexai.Client(project=self._project_id, location=self._location)
 
+        memory_bank_config = {
+            "generation_config": {
+                "model": "projects/{}/locations/{}/publishers/google/models/gemini-3.1-pro-preview".format(
+                    self._project_id, self._location
+                ),
+            },
+            "similarity_search_config": {
+                "embedding_model": "projects/{}/locations/{}/publishers/google/models/text-embedding-005".format(
+                    self._project_id, self._location
+                ),
+            },
+            "ttl_config": {
+                "default_ttl": "{}s".format(365 * 24 * 60 * 60)
+            },
+            "customization_configs": [
+                {
+                    "memory_topics": [
+                        {"managed_memory_topic": {"managed_topic_enum": "USER_PERSONAL_INFO"}},
+                        {"managed_memory_topic": {"managed_topic_enum": "USER_PREFERENCES"}},
+                        {"managed_memory_topic": {"managed_topic_enum": "KEY_CONVERSATION_DETAILS"}},
+                        {"managed_memory_topic": {"managed_topic_enum": "EXPLICIT_INSTRUCTIONS"}}
+                    ],
+                    "consolidation_config": {
+                        "revisions_per_candidate_count": 1
+                    },
+                    "generate_memories_examples": [],
+                    "enable_third_person_memories": False
+                }
+            ],
+            "disable_memory_revisions": False
+        }
+
         config = {
             "display_name": f"hermes-memory-{self._app_name}",
             "context_spec": {
-                "memory_bank_config": {
-                    "generation_config": {
-                        "model": "projects/{}/locations/{}/publishers/google/models/gemini-3.1-pro-preview".format(
-                            self._project_id, self._location
-                        ),
-                    },
-                    "similarity_search_config": {
-                        "embedding_model": "projects/{}/locations/{}/publishers/google/models/gemini-embedding-001".format(
-                            self._project_id, self._location
-                        ),
-                    },
-                },
+                "memory_bank_config": memory_bank_config,
             },
         }
         engine = client.agent_engines.create(config=config)
