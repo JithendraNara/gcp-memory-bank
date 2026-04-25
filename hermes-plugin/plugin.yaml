@@ -1,0 +1,7 @@
+name: gcp-memory-bank
+description: Google Cloud Memory Bank for persistent cross-session agent memory
+version: 0.1.0
+author: Jithendra Nara
+requires:
+  - google-adk
+  - google-cloud-aiplatform>=1.93
