@@ -1,10 +1,12 @@
 name: gcp-memory-bank
-version: 1.0.0
-description: "Google Cloud Memory Bank — managed LLM-powered memory with extraction, consolidation, and semantic search via Gemini Enterprise Agent Platform."
+version: 1.1.0
+description: "Google Cloud Memory Bank — Hermes plugin with full GCP API coverage (CRUD, revisions, ingest, rollback). Managed LLM-powered memory with extraction, consolidation, and semantic search via Gemini Enterprise Agent Platform."
 pip_dependencies:
   - google-cloud-aiplatform>=1.148.0
   - google-genai>=1.73.0
 requires_env: []
 hooks:
   - on_session_end
+  - on_pre_compress
   - on_memory_write
+  - sync_turn
