@@ -765,7 +765,9 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._prefetch_mode = self._config.get("prefetch_mode", "facts")
         if self._prefetch_mode not in ("facts", "narrative"):
             self._prefetch_mode = "facts"
-        self._use_gcp_sessions = bool(self._config.get("use_gcp_sessions", True))
+        # Preserve manual override if already set before initialize()
+        if not hasattr(self, '_use_gcp_sessions'):
+            self._use_gcp_sessions = bool(self._config.get("use_gcp_sessions", True))
         if self._engine_id:
             self._parent = (
                 f"projects/{self._project_id}/locations/{self._location}"
