@@ -565,23 +565,35 @@ class GcpMemoryBankProvider(MemoryProvider):
             logger.warning("Failed to append events to GCP Session: %s", e)
 
     def _ingest_events(self, events: List[Dict[str, Any]], turn_count: int) -> None:
-        """Fallback ingest via ingest_events (proven working path)."""
+        """Fallback: create individual memories directly via memories.create().
+
+        ingest_events with direct_contents_source is broken in current SDK versions
+        (returns done=None, never processes events). We fall back to creating
+        individual memories directly, which is slower but guaranteed to work.
+        """
         try:
             vclient = self._get_vertex_client()
             engine_name = (
                 f"projects/{self._project_id}/locations/{self._location}"
                 f"/reasoningEngines/{self._engine_id}"
             )
-            vclient.agent_engines.memories.ingest_events(
-                name=engine_name,
-                scope=self._retrieval_scope(),
-                direct_contents_source={"events": events},
-            )
+            created = 0
+            for ev in events:
+                text = ev.get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                if len(text) < 10:
+                    continue  # Skip very short events
+                # Create memory directly (proven working path)
+                vclient.agent_engines.memories.create(
+                    name=engine_name,
+                    fact=text[:1024],  # Truncate very long events
+                    scope=self._retrieval_scope(),
+                )
+                created += 1
             self._record_success()
-            logger.info("Memory ingest triggered (%d events, %d turns).", len(events), turn_count)
+            logger.info("Fallback memory creation: %d/%d events stored as individual memories.", created, len(events))
         except Exception as e:
             self._record_failure()
-            logger.warning("Memory ingest failed: %s", e)
+            logger.warning("Fallback memory creation failed: %s", e)
 
     def _build_engine_config(self) -> Dict[str, Any]:
         """Return Memory Bank config per official docs."""
