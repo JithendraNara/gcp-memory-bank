@@ -953,17 +953,19 @@ class GcpMemoryBankProvider(MemoryProvider):
                         f"projects/{self._project_id}/locations/{self._location}"
                         f"/reasoningEngines/{self._engine_id}"
                     )
-                    vclient.agent_engines.memories.generate(
+                    gen_op = vclient.agent_engines.memories.generate(
                         name=engine_name,
                         vertex_session_source={"session": self._gcp_session_name},
                         scope=self._retrieval_scope(),
-                        config={"wait_for_completion": False},
                     )
                     self._record_success()
+                    action = "unknown"
+                    if gen_op.done and gen_op.response and gen_op.response.generated_memories:
+                        action = gen_op.response.generated_memories[0].action
                     logger.info(
-                        "Session-end memory generation via vertex_session_source triggered "
+                        "Session-end memory generation via vertex_session_source: %s "
                         "(GCP Session: %s, %d events, %d turns).",
-                        self._gcp_session_name, len(events), turn_count,
+                        action, self._gcp_session_name, len(events), turn_count,
                     )
                 else:
                     # Fallback: ingest_events with buffered events
@@ -1007,16 +1009,18 @@ class GcpMemoryBankProvider(MemoryProvider):
                         f"projects/{self._project_id}/locations/{self._location}"
                         f"/reasoningEngines/{self._engine_id}"
                     )
-                    vclient.agent_engines.memories.generate(
+                    gen_op = vclient.agent_engines.memories.generate(
                         name=engine_name,
                         vertex_session_source={"session": self._gcp_session_name},
                         scope=self._retrieval_scope(),
-                        config={"wait_for_completion": False},
                     )
                     self._record_success()
+                    action = "unknown"
+                    if gen_op.done and gen_op.response and gen_op.response.generated_memories:
+                        action = gen_op.response.generated_memories[0].action
                     logger.info(
-                        "Pre-compress memory generation via vertex_session_source triggered "
-                        "(%d events, %d turns).", len(events), turn_count,
+                        "Pre-compress memory generation via vertex_session_source: %s "
+                        "(%d events, %d turns).", action, len(events), turn_count,
                     )
                 else:
                     self._ingest_events(events, turn_count)
