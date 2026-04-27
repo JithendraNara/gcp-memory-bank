@@ -310,6 +310,10 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._generate_every_n = 0
         self._auto_prefetch = True
         self._prefetch_mode = "facts"
+        # GCP Session integration
+        self._gcp_session_name: Optional[str] = None
+        self._gcp_session_lock = threading.Lock()
+        self._use_gcp_sessions: bool = True
 
     @property
     def name(self) -> str:
@@ -416,6 +420,18 @@ class GcpMemoryBankProvider(MemoryProvider):
                 "default": "facts",
                 "choices": ["facts", "narrative"],
             },
+            {
+                "key": "use_gcp_sessions",
+                "description": "Use GCP Agent Runtime Sessions as the primary event store for automatic memory generation via vertex_session_source.",
+                "required": False,
+                "default": True,
+            },
+            {
+                "key": "gcp_session_ttl_seconds",
+                "description": "TTL for GCP Sessions (minimum 86400 = 24 hours).",
+                "required": False,
+                "default": 86400,
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -477,6 +493,95 @@ class GcpMemoryBankProvider(MemoryProvider):
                 )
             )
             return self._client
+
+    def _ensure_gcp_session(self) -> Optional[str]:
+        """Create or return an existing GCP Agent Runtime Session.
+
+        Sessions are used as the official event store for vertex_session_source
+        memory generation. Minimum TTL is 86400s (24h).
+        """
+        if not self._use_gcp_sessions:
+            return None
+        if self._gcp_session_name:
+            return self._gcp_session_name
+        with self._gcp_session_lock:
+            if self._gcp_session_name:
+                return self._gcp_session_name
+            try:
+                vclient = self._get_vertex_client()
+                engine_name = (
+                    f"projects/{self._project_id}/locations/{self._location}"
+                    f"/reasoningEngines/{self._engine_id}"
+                )
+                ttl_secs = max(int(self._config.get("gcp_session_ttl_seconds", 86400)), 86400)
+                op = vclient.agent_engines.sessions.create(
+                    name=engine_name,
+                    user_id=self._user_id,
+                    config={
+                        "display_name": f"hermes-{self._session_id[:16] if self._session_id else 'unknown'}",
+                        "ttl": f"{ttl_secs}s",
+                    },
+                )
+                self._gcp_session_name = op.response.name
+                self._record_success()
+                logger.info("Created GCP Session: %s", self._gcp_session_name)
+                return self._gcp_session_name
+            except Exception as e:
+                self._record_failure()
+                logger.warning("Failed to create GCP Session: %s", e)
+                return None
+
+    def _append_events_to_gcp_session(self, events: List[Dict[str, Any]], turn_marker: int = 0) -> None:
+        """Synchronously append events to the active GCP Session.
+
+        Call this from background threads only. Adds deterministic event_id
+        for deduplication.
+        """
+        if not self._gcp_session_name:
+            return
+        import datetime as _dt
+        try:
+            vclient = self._get_vertex_client()
+            for idx, ev in enumerate(events):
+                role = ev.get("content", {}).get("role", "user")
+                text = ev.get("content", {}).get("parts", [{}])[0].get("text", "")
+                event_id = ev.get("event_id", f"{self._session_id or 'unknown'}-t{turn_marker}-e{idx}")
+                vclient.agent_engines.sessions.events.append(
+                    name=self._gcp_session_name,
+                    author=role,
+                    invocation_id=event_id,
+                    timestamp=_dt.datetime.now(_dt.timezone.utc),
+                    config={
+                        "content": {
+                            "role": role,
+                            "parts": [{"text": text}]
+                        }
+                    },
+                )
+            logger.debug("Appended %d events to GCP Session %s", len(events), self._gcp_session_name)
+            self._record_success()
+        except Exception as e:
+            self._record_failure()
+            logger.warning("Failed to append events to GCP Session: %s", e)
+
+    def _ingest_events(self, events: List[Dict[str, Any]], turn_count: int) -> None:
+        """Fallback ingest via ingest_events (proven working path)."""
+        try:
+            vclient = self._get_vertex_client()
+            engine_name = (
+                f"projects/{self._project_id}/locations/{self._location}"
+                f"/reasoningEngines/{self._engine_id}"
+            )
+            vclient.agent_engines.memories.ingest_events(
+                name=engine_name,
+                scope=self._retrieval_scope(),
+                direct_contents_source={"events": events},
+            )
+            self._record_success()
+            logger.info("Memory ingest triggered (%d events, %d turns).", len(events), turn_count)
+        except Exception as e:
+            self._record_failure()
+            logger.warning("Memory ingest failed: %s", e)
 
     def _build_engine_config(self) -> Dict[str, Any]:
         """Return Memory Bank config per official docs."""
@@ -648,15 +753,16 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._prefetch_mode = self._config.get("prefetch_mode", "facts")
         if self._prefetch_mode not in ("facts", "narrative"):
             self._prefetch_mode = "facts"
+        self._use_gcp_sessions = bool(self._config.get("use_gcp_sessions", True))
         if self._engine_id:
             self._parent = (
                 f"projects/{self._project_id}/locations/{self._location}"
                 f"/reasoningEngines/{self._engine_id}"
             )
             logger.info(
-                "GCP Memory Bank initialized: project=%s location=%s engine=%s user=%s app=%s context=%s generate_every_n=%s auto_prefetch=%s",
+                "GCP Memory Bank initialized: project=%s location=%s engine=%s user=%s app=%s context=%s generate_every_n=%s auto_prefetch=%s use_gcp_sessions=%s",
                 self._project_id, self._location, self._engine_id, self._user_id, self._app_name, self._agent_context,
-                self._generate_every_n, self._auto_prefetch,
+                self._generate_every_n, self._auto_prefetch, self._use_gcp_sessions,
             )
         else:
             self._ensure_engine()
@@ -670,11 +776,15 @@ class GcpMemoryBankProvider(MemoryProvider):
                     f"projects/{self._project_id}/locations/{self._location}"
                     f"/reasoningEngines/{self._engine_id}"
                 )
+        # Kick off GCP Session creation in background so sync_turn isn't blocked
+        if self._use_gcp_sessions and self._engine_id:
+            threading.Thread(target=self._ensure_gcp_session, daemon=True, name="gcp-session-init").start()
 
     def system_prompt_block(self) -> str:
+        session_info = f" Session: {self._gcp_session_name.split('/')[-1]}." if self._gcp_session_name else ""
         return (
             "# GCP Memory Bank\n"
-            f"Active. Engine: {self._engine_id}. User: {self._user_id}.\n"
+            f"Active. Engine: {self._engine_id}. User: {self._user_id}.{session_info}\n"
             "Use memory_search to find facts, memory_store to save preferences, "
             "memory_get to fetch a specific memory, memory_delete to remove one, "
             "memory_profile for a full overview, memory_revisions to inspect history, "
@@ -744,60 +854,65 @@ class GcpMemoryBankProvider(MemoryProvider):
     # -----------------------------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Buffer conversation events. Memory generation happens at session end."""
+        """Buffer conversation events and mirror to GCP Session.
+
+        Events are appended to the active GCP Session (fire-and-forget) for
+        official vertex_session_source memory generation at session end.
+        A local buffer is kept as fallback for ingest_events.
+        """
         if self._agent_context != "primary":
             return
+        user_event = {
+            "content": {"role": "user", "parts": [{"text": user_content}]}
+        }
+        model_event = {
+            "content": {"role": "model", "parts": [{"text": assistant_content}]}
+        }
+        events = [user_event, model_event]
+
         with self._events_lock:
-            # Chronological order: user first, then assistant
-            self._events.append({
-                "content": {
-                    "role": "user",
-                    "parts": [{"text": user_content}]
-                }
-            })
-            self._events.append({
-                "content": {
-                    "role": "model",
-                    "parts": [{"text": assistant_content}]
-                }
-            })
+            self._events.extend(events)
             self._turn_count += 1
-            # Cap event buffer to prevent unbounded growth in long sessions
-            # Max ~50 turns = 100 events
+            turn_count_snapshot = self._turn_count
             if len(self._events) > 200:
                 self._events = self._events[-200:]
-            # Mid-session generation trigger
-            if self._generate_every_n > 0 and self._turn_count >= self._generate_every_n and self._events:
+            should_generate_mid = self._generate_every_n > 0 and self._turn_count >= self._generate_every_n
+            if should_generate_mid:
                 events_copy = list(self._events)
                 self._events.clear()
-                turn_count_snapshot = self._turn_count
                 self._turn_count = 0
-                self._trigger_mid_session_generate(events_copy, turn_count_snapshot)
 
-    def _trigger_mid_session_generate(self, events: List[Dict[str, Any]], turn_count: int) -> None:
-        """Fire-and-forget mid-session memory generation."""
+        # Mirror to GCP Session (official event store)
+        if self._use_gcp_sessions:
+            if not self._gcp_session_name:
+                self._ensure_gcp_session()
+            if self._gcp_session_name:
+                threading.Thread(
+                    target=self._append_events_to_gcp_session,
+                    args=(events, turn_count_snapshot),
+                    daemon=True,
+                    name=f"gcp-sess-append-{turn_count_snapshot}",
+                ).start()
+
+        # Mid-session fallback generation via ingest_events (proven working)
+        if should_generate_mid:
+            self._trigger_mid_session_ingest(events_copy, turn_count_snapshot)
+
+    def _trigger_mid_session_ingest(self, events: List[Dict[str, Any]], turn_count: int) -> None:
+        """Fire-and-forget mid-session memory ingest via ingest_events.
+
+        Uses the proven ingest_events path rather than generate() which silently
+        fails with direct_contents_source in current SDK versions.
+        """
         if self._is_breaker_open():
             return
-        def _generate():
+        def _ingest():
             try:
-                import vertexai
-                client = vertexai.Client(project=self._project_id, location=self._location)
-                engine_name = f"projects/{self._project_id}/locations/{self._location}/reasoningEngines/{self._engine_id}"
-                client.agent_engines.memories.generate(
-                    name=engine_name,
-                    direct_contents_source={"events": events},
-                    scope=self._retrieval_scope(),
-                    config={
-                        "wait_for_completion": False,
-                        "revision_labels": {"generation_trigger": "mid_session"},
-                    },
-                )
-                self._record_success()
-                logger.info("Mid-session memory generation triggered (%d events, %d turns).", len(events), turn_count)
+                self._ingest_events(events, turn_count)
+                logger.info("Mid-session memory ingest completed (%d events, %d turns).", len(events), turn_count)
             except Exception as e:
-                self._record_failure()
-                logger.warning("Mid-session memory generation failed: %s", e)
-        self._mid_gen_thread = threading.Thread(target=_generate, daemon=True, name="gcp-mb-mid-gen")
+                logger.warning("Mid-session memory ingest failed: %s", e)
+        self._mid_gen_thread = threading.Thread(target=_ingest, daemon=True, name="gcp-mb-mid-ingest")
         self._mid_gen_thread.start()
 
     # -----------------------------------------------------------------------
@@ -805,10 +920,13 @@ class GcpMemoryBankProvider(MemoryProvider):
     # -----------------------------------------------------------------------
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Flush buffered conversation events to GCP Memory Bank via ingest_events.
+        """Generate memories from GCP Session via vertex_session_source.
 
-        Uses the proven ingest_events API path (background processing) rather than
-        the generate() path which silently fails in current SDK versions.
+        Primary path: append remaining buffered events to GCP Session, then call
+        generate(vertex_session_source=...) for automatic memory extraction.
+
+        Fallback path: if GCP Session is unavailable, use ingest_events with the
+        local event buffer.
         """
         if self._agent_context != "primary":
             return
@@ -819,41 +937,54 @@ class GcpMemoryBankProvider(MemoryProvider):
             self._events.clear()
             turn_count = self._turn_count
             self._turn_count = 0
-        if not events:
+        if not events and not self._gcp_session_name:
             return
 
-        def _ingest():
+        def _end_session():
             try:
-                vclient = self._get_vertex_client()
-                engine_name = (
-                    f"projects/{self._project_id}/locations/{self._location}"
-                    f"/reasoningEngines/{self._engine_id}"
-                )
-                vclient.agent_engines.memories.ingest_events(
-                    name=engine_name,
-                    scope=self._retrieval_scope(),
-                    direct_contents_source={"events": events},
-                )
-                self._record_success()
-                logger.info(
-                    "Memory ingest triggered in background (%d events, %d turns).",
-                    len(events), turn_count,
-                )
+                # 1. Flush remaining buffered events to GCP Session
+                if self._gcp_session_name and events:
+                    self._append_events_to_gcp_session(events, turn_count)
+
+                # 2. Official path: generate from GCP Session
+                if self._gcp_session_name:
+                    vclient = self._get_vertex_client()
+                    engine_name = (
+                        f"projects/{self._project_id}/locations/{self._location}"
+                        f"/reasoningEngines/{self._engine_id}"
+                    )
+                    vclient.agent_engines.memories.generate(
+                        name=engine_name,
+                        vertex_session_source={"session": self._gcp_session_name},
+                        scope=self._retrieval_scope(),
+                        config={"wait_for_completion": False},
+                    )
+                    self._record_success()
+                    logger.info(
+                        "Session-end memory generation via vertex_session_source triggered "
+                        "(GCP Session: %s, %d events, %d turns).",
+                        self._gcp_session_name, len(events), turn_count,
+                    )
+                else:
+                    # Fallback: ingest_events with buffered events
+                    if events:
+                        self._ingest_events(events, turn_count)
             except Exception as e:
                 self._record_failure()
-                logger.warning("Memory ingest failed: %s", e)
+                logger.warning("Session-end vertex_session_source failed: %s", e)
+                if events:
+                    self._ingest_events(events, turn_count)
 
-        threading.Thread(target=_ingest, daemon=True, name="gcp-mb-ingest").start()
+        threading.Thread(target=_end_session, daemon=True, name="gcp-mb-session-end").start()
 
     # -----------------------------------------------------------------------
     # Pre-compress: flush buffered events before context truncation
     # -----------------------------------------------------------------------
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> None:
-        """Flush buffered events to Memory Bank before context compression discards them.
+        """Generate memories from GCP Session before context compression discards them.
 
-        Uses the proven ingest_events API path rather than generate() which silently
-        fails in current SDK versions.
+        Primary: vertex_session_source generation. Fallback: ingest_events.
         """
         if self._agent_context != "primary":
             return
@@ -867,28 +998,34 @@ class GcpMemoryBankProvider(MemoryProvider):
         if not events:
             return
 
-        def _ingest():
+        def _precompress():
             try:
-                vclient = self._get_vertex_client()
-                engine_name = (
-                    f"projects/{self._project_id}/locations/{self._location}"
-                    f"/reasoningEngines/{self._engine_id}"
-                )
-                vclient.agent_engines.memories.ingest_events(
-                    name=engine_name,
-                    scope=self._retrieval_scope(),
-                    direct_contents_source={"events": events},
-                )
-                self._record_success()
-                logger.info(
-                    "Pre-compress memory ingest triggered (%d events, %d turns).",
-                    len(events), turn_count,
-                )
+                if self._gcp_session_name:
+                    self._append_events_to_gcp_session(events, turn_count)
+                    vclient = self._get_vertex_client()
+                    engine_name = (
+                        f"projects/{self._project_id}/locations/{self._location}"
+                        f"/reasoningEngines/{self._engine_id}"
+                    )
+                    vclient.agent_engines.memories.generate(
+                        name=engine_name,
+                        vertex_session_source={"session": self._gcp_session_name},
+                        scope=self._retrieval_scope(),
+                        config={"wait_for_completion": False},
+                    )
+                    self._record_success()
+                    logger.info(
+                        "Pre-compress memory generation via vertex_session_source triggered "
+                        "(%d events, %d turns).", len(events), turn_count,
+                    )
+                else:
+                    self._ingest_events(events, turn_count)
             except Exception as e:
                 self._record_failure()
-                logger.warning("Pre-compress memory ingest failed: %s", e)
+                logger.warning("Pre-compress vertex_session_source failed: %s", e)
+                self._ingest_events(events, turn_count)
 
-        threading.Thread(target=_ingest, daemon=True, name="gcp-mb-precompress").start()
+        threading.Thread(target=_precompress, daemon=True, name="gcp-mb-precompress").start()
 
     def shutdown(self) -> None:
         """Clean shutdown — close the gRPC client connection."""
@@ -914,38 +1051,19 @@ class GcpMemoryBankProvider(MemoryProvider):
         if self._is_breaker_open():
             return
         fact = f"[{action.upper()} {target}] {content}"
-        revision_labels = self._config.get("default_revision_labels", {})
 
         def _write():
             try:
-                if revision_labels:
-                    vclient = self._get_vertex_client()
-                    engine_name = (
-                        f"projects/{self._project_id}/locations/{self._location}"
-                        f"/reasoningEngines/{self._engine_id}"
-                    )
-                    vclient.agent_engines.memories.generate(
-                        name=engine_name,
-                        scope=self._retrieval_scope(),
-                        direct_contents_source={
-                            "events": [{"content": {"role": "model", "parts": [{"text": fact}]}}]
-                        },
-                        config={
-                            "wait_for_completion": False,
-                            "revision_labels": revision_labels,
-                        },
-                    )
-                else:
-                    vclient = self._get_vertex_client()
-                    engine_name = (
-                        f"projects/{self._project_id}/locations/{self._location}"
-                        f"/reasoningEngines/{self._engine_id}"
-                    )
-                    vclient.agent_engines.memories.create(
-                        name=engine_name,
-                        fact=fact,
-                        scope=self._retrieval_scope(),
-                    )
+                vclient = self._get_vertex_client()
+                engine_name = (
+                    f"projects/{self._project_id}/locations/{self._location}"
+                    f"/reasoningEngines/{self._engine_id}"
+                )
+                vclient.agent_engines.memories.create(
+                    name=engine_name,
+                    fact=fact,
+                    scope=self._retrieval_scope(),
+                )
                 self._record_success()
             except Exception as e:
                 self._record_failure()
