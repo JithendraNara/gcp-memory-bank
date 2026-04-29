@@ -76,3 +76,6 @@ Thumbs.db
 service-account*.json
 *credentials*.json
 secrets.json
+hermes-plugin-v2/__pycache__/
+hermes-plugin-v2/.pytest_cache/
+hermes-plugin-v2/tests/__pycache__/
