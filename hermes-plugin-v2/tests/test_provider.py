@@ -549,3 +549,65 @@ class TestSchemas:
         assert len(names) == 11
         assert "memory_synthesize" in names
         assert all(n.startswith("memory_") for n in names)
+
+
+# ---------------------------------------------------------------------------
+# v2.1 fixes — pollution filter, debounce, throttle retry detection
+# ---------------------------------------------------------------------------
+class TestPollutionFilter:
+    def test_pollution_patterns(self):
+        from gcp_memory_bank_v2.retrieval import is_pollution
+        # Real captures from the live engine on 2026-04-29.
+        assert is_pollution("Review the conversation above and consider whether a skill should be saved or updated.")
+        assert is_pollution("**Nothing to save.**\n\nThe task class: ...")
+        assert is_pollution("Health check memory created at 2026-04-29T06:03:04Z. Test ID: health-check-140b6734")
+        assert is_pollution("[IMPORTANT: Background process proc_ce5ce3398892 completed (exit code 1).")
+        # Real-content false positives
+        assert not is_pollution("My favorite VPN protocol is WireGuard.")
+        assert not is_pollution("User uses Postgres with pgvector for embedding storage.")
+
+    def test_pollution_blocks_sync_turn(self, provider):
+        p, fake = provider
+        # Real polluting message that was captured on 2026-04-29.
+        p.sync_turn("Review the conversation above and consider whether a skill should be saved.",
+                    "Some assistant reply.")
+        time.sleep(0.3)
+        assert not any(c["op"] in {"create_session", "append_event", "create_memory"} for c in fake.calls)
+
+
+class TestSessionEndDebounce:
+    def test_back_to_back_calls_debounced(self, provider):
+        p, fake = provider
+        p.sync_turn("Real user message about postgres.", "Real reply.")
+        time.sleep(0.3)
+        # First call dispatches generate.
+        p.on_session_end([])
+        time.sleep(0.4)
+        first_count = sum(1 for c in fake.calls if c["op"] == "generate_from_session")
+        # Second call within cooldown should NOT dispatch.
+        p.on_session_end([])
+        time.sleep(0.3)
+        second_count = sum(1 for c in fake.calls if c["op"] == "generate_from_session")
+        assert second_count == first_count, "expected debounce to drop second call"
+
+
+class TestThrottleRetry:
+    def test_code_8_throttle_detected(self):
+        from gcp_memory_bank_v2.client import _retry
+        attempts = {"n": 0}
+        def flaky():
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                raise RuntimeError(
+                    "Failed to generate memory: {'code': 8, 'message': 'throttled. Please try again.'}"
+                )
+            return "ok"
+        # Force the no-tenacity path so the test is portable.
+        import sys
+        if "tenacity" in sys.modules:
+            # If tenacity is available, the real path should also retry on
+            # the throttle detector. Either way, after 2 attempts we see "ok".
+            pass
+        result = _retry(flaky, attempts=3)
+        assert result == "ok"
+        assert attempts["n"] == 2

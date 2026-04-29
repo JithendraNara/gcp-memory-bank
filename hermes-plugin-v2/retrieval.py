@@ -28,6 +28,33 @@ _TRIVIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+# Sub-agent / system prompt fragments observed in production (2026-04-29).
+# When the auto-extract path captures these in vertex_session_source, the
+# Gemini extractor obediently turns them into "memories" like:
+#   "Review the conversation above and consider whether a skill should be saved..."
+# which pollute the recall surface for the rest of the user's life.
+#
+# We refuse to ingest any turn whose user_text matches one of these patterns.
+_POLLUTION_PATTERNS = [
+    re.compile(r"^\s*Review the conversation above", re.IGNORECASE),
+    re.compile(r"^\s*\*?\*?Nothing to save", re.IGNORECASE),
+    re.compile(r"Health check memory created at \d{4}-\d{2}-\d{2}T", re.IGNORECASE),
+    re.compile(r"^\s*Focus on:\s*\n", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Work in this", re.IGNORECASE),
+    re.compile(r"\[IMPORTANT: Background process proc_", re.IGNORECASE),
+    re.compile(r"^\s*Test ID: health-check-", re.IGNORECASE),
+]
+
+
+def is_pollution(text: str) -> bool:
+    """Return True if the text looks like a sub-agent prompt fragment that
+    should never be persisted to long-term memory."""
+    if not text:
+        return False
+    sample = text[:400]
+    return any(p.search(sample) for p in _POLLUTION_PATTERNS)
+
 FENCE_OPEN = "<gcp-mb-context>"
 FENCE_CLOSE = "</gcp-mb-context>"
 FENCE_PREAMBLE = (

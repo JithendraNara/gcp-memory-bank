@@ -62,6 +62,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "auto_prefetch": True,
     "prefetch_mode": "facts",         # facts | narrative
     "trivial_skip": True,
+    "pollution_filter": True,         # NEW v2.1 — block sub-agent prompt fragments from extraction
+    "session_end_cooldown_seconds": 30, # NEW v2.1 — debounce parallel session-end generates
     # ---- Ingestion -------------------------------------------------------
     "use_gcp_sessions": True,
     "gcp_session_ttl_seconds": 86400,

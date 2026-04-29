@@ -91,14 +91,36 @@ def _retry(fn: Callable, *args: Any, attempts: int = 3, **kwargs: Any) -> Any:
     # Real tenacity path with a meaningful filter.
     try:
         from google.api_core import exceptions as gx  # type: ignore
-        retryable = (gx.ResourceExhausted, gx.ServiceUnavailable, gx.DeadlineExceeded, ConnectionError)
+        retryable_exceptions = (
+            gx.ResourceExhausted, gx.ServiceUnavailable, gx.DeadlineExceeded,
+            ConnectionError,
+        )
     except Exception:
-        retryable = (ConnectionError,)
+        retryable_exceptions = (ConnectionError,)
+
+    def _is_throttle(e: BaseException) -> bool:
+        """Detect Gemini code-8 throttle errors that surface as RuntimeError.
+        Observed in production at 2026-04-29 00:17 — gemini-3.1-pro-preview
+        threw {"code": 8, "message": "... throttled. Please try again."}
+        wrapped in RuntimeError. The standard ResourceExhausted catch misses
+        these because the SDK rewraps them."""
+        if isinstance(e, retryable_exceptions):
+            return True
+        msg = str(e)
+        if "throttle" in msg.lower():
+            return True
+        if "'code': 8" in msg or "code: 8" in msg:
+            return True
+        if "RESOURCE_EXHAUSTED" in msg:
+            return True
+        return False
+
+    from tenacity import retry_if_exception  # type: ignore
 
     decorator = retry(
         stop=stop_after_attempt(attempts),
-        wait=wait_exponential(multiplier=1, min=1, max=15),
-        retry=retry_if_exception_type(retryable),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_throttle),
         reraise=True,
     )
     return decorator(fn)(*args, **kwargs)
@@ -250,6 +272,7 @@ class MemoryBankClient:
         query: Optional[str] = None,
         top_k: int = 8,
         filter_expr: Optional[str] = None,
+        no_retry: bool = False,
     ) -> List[Dict[str, Any]]:
         # Fast path for plain similarity search → low-level proto client.
         if query and not filter_expr:
@@ -263,7 +286,20 @@ class MemoryBankClient:
                     scope=scope,
                     similarity_search_params={"search_query": query, "top_k": int(top_k)},
                 )
-                resp = self._call(pc.retrieve_memories, request=req)
+                if no_retry:
+                    # Hot-path call (e.g. prefetch). Skip retries entirely so a
+                    # transient error returns fast instead of blocking the
+                    # turn for up to ~14s of exponential backoff.
+                    if not self._breaker.allow():
+                        return []
+                    try:
+                        resp = pc.retrieve_memories(request=req, timeout=4.0)
+                        self._breaker.record_success()
+                    except Exception:
+                        self._breaker.record_failure()
+                        raise
+                else:
+                    resp = self._call(pc.retrieve_memories, request=req)
                 return [
                     {
                         "name": getattr(r.memory, "name", ""),

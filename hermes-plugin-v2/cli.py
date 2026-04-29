@@ -381,6 +381,94 @@ def _cmd_sessions_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sessions_clean(args: argparse.Namespace) -> int:
+    """Delete all sessions on the engine EXCEPT the one currently persisted
+    for cross-process reuse. Recovers from the v1 leak (we found 40 sessions
+    on engine 4938048007586185216 on 2026-04-29)."""
+    client, _ = _build_client()
+    if client is None:
+        return 1
+    keep: set = set()
+    persist_dir = Path(_hermes_home()) / ".gmb-sessions"
+    if persist_dir.is_dir():
+        for f in persist_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                name = data.get("session_name") or ""
+                if name:
+                    keep.add(name)
+            except Exception:
+                pass
+    if not keep and not args.force:
+        print("error: no persisted session(s) to keep — re-run with --force to "
+              "delete ALL sessions on the engine.", file=sys.stderr)
+        return 2
+    sessions = client.list_sessions(user_id=args.user)
+    to_delete = []
+    for s in sessions:
+        name = s.get("name") if isinstance(s, dict) else getattr(s, "name", "")
+        if name and name not in keep:
+            to_delete.append(name)
+    if not to_delete:
+        print(f"Nothing to clean — {len(sessions)} session(s) all match the persisted set.")
+        return 0
+    print(f"Will keep {len(keep)} persisted session(s):")
+    for k in keep:
+        print(f"  KEEP  {k.split('/')[-1]}")
+    print(f"\nWill delete {len(to_delete)} session(s):")
+    for n in to_delete[:20]:
+        print(f"  DROP  {n.split('/')[-1]}")
+    if len(to_delete) > 20:
+        print(f"  ... +{len(to_delete) - 20} more")
+    if not args.force:
+        print(f"\nDry run. Re-run with --force to actually delete.")
+        return 0
+    deleted, failed = 0, 0
+    for n in to_delete:
+        try:
+            client.delete_session(n)
+            deleted += 1
+        except Exception as e:
+            failed += 1
+            print(f"  fail {n}: {e}", file=sys.stderr)
+    print(f"\nDeleted {deleted}, failed {failed}.")
+    return 0
+
+
+def _cmd_clean_pollution(args: argparse.Namespace) -> int:
+    """Delete memories that match the pollution patterns we've added to
+    the live ingest filter. Recovers from the polluted writes between
+    plugin install and pollution_filter landing."""
+    client, _ = _build_client()
+    if client is None:
+        return 1
+    from .retrieval import is_pollution
+    polluted = []
+    for m in client.list_memories(page_size=500):
+        fact = m.get("fact") or ""
+        if is_pollution(fact):
+            polluted.append(m)
+    print(f"Found {len(polluted)} polluted memories.")
+    for m in polluted[:10]:
+        name = m.get("name", "?")
+        print(f"  [{name.split('/')[-1]}] {(m.get('fact') or '')[:80]}")
+    if len(polluted) > 10:
+        print(f"  ... +{len(polluted) - 10} more")
+    if not args.force:
+        print("\nDry run. Re-run with --force to delete.")
+        return 0
+    deleted, failed = 0, 0
+    for m in polluted:
+        try:
+            client.delete_memory(m["name"])
+            deleted += 1
+        except Exception as e:
+            failed += 1
+            print(f"  fail {m['name']}: {e}", file=sys.stderr)
+    print(f"\nDeleted {deleted}, failed {failed}.")
+    return 0
+
+
 def _cmd_iam_check(args: argparse.Namespace) -> int:
     print("IAM Conditions: api.getAttribute('aiplatform.googleapis.com/memoryScope', {})")
     print("CAVEAT: ListMemories and PurgeMemories ignore Conditions.")
@@ -445,6 +533,15 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     ssub = sess.add_subparsers(dest="sessions_command")
     p = ssub.add_parser("list"); p.add_argument("--user", default=None); p.set_defaults(_handler=_cmd_sessions_list)
     p = ssub.add_parser("delete"); p.add_argument("session_name"); p.set_defaults(_handler=_cmd_sessions_delete)
+    p = ssub.add_parser("clean", help="Delete all sessions except the persisted one(s).")
+    p.add_argument("--user", default=None)
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(_handler=_cmd_sessions_clean)
+
+    p = sub.add_parser("clean-pollution",
+                       help="Delete memories matching the pollution-filter patterns.")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(_handler=_cmd_clean_pollution)
 
     iam = sub.add_parser("iam"); iamsub = iam.add_subparsers(dest="iam_command")
     p = iamsub.add_parser("check"); p.set_defaults(_handler=_cmd_iam_check)

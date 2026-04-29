@@ -58,6 +58,7 @@ from .retrieval import (
     PrefetchCache,
     fence,
     format_memories,
+    is_pollution,
     is_trivial,
     strip_fence,
     truncate_to_budget,
@@ -111,6 +112,7 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._platform: str = "cli"
         self._agent_context: str = "primary"
         self._writes_enabled: bool = True
+        self._hermes_home: str = ""
         self._buffer: Optional[EventBuffer] = None
         self._sessions: Optional[GcpSessionMirror] = None
         self._prefetch: Optional[PrefetchCache] = None
@@ -118,6 +120,13 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._scope_detector = ScopeDriftDetector()
         self._configured_instance: bool = False
         self._lock = threading.Lock()
+        # Session-end debounce — observed 8 parallel generate(vertex_session_source)
+        # calls in 30s on 2026-04-29 00:17, all hitting Gemini quota. Track the
+        # last dispatch time per session and skip if within the cooldown.
+        # Use -inf so the first call after init always passes (monotonic clock
+        # in a fresh process can be < cooldown_s).
+        self._last_session_end_at: float = float("-inf")
+        self._session_end_cooldown_s: float = 30.0
 
     # ------------------------------------------------------------------
     # Availability + config
@@ -172,6 +181,7 @@ class GcpMemoryBankProvider(MemoryProvider):
             or os.environ.get("HERMES_HOME")
             or os.path.expanduser("~/.hermes")
         )
+        self._hermes_home = hermes_home
         cfg = load_config(hermes_home)
         self._config = cfg
         self._platform = str(kwargs.get("platform") or "cli")
@@ -333,7 +343,10 @@ class GcpMemoryBankProvider(MemoryProvider):
         q = (query or "")[:cap]
         results: List[Dict[str, Any]] = []
         if self._prefetch is not None:
-            results = self._prefetch.get(q, sync_timeout=3.0)
+            # Tight timeout — prefetch is on the user-perceived critical path.
+            # Hermes blocks the turn until this returns, so we must be quick.
+            sync_to = float(cfg.raw.get("prefetch_sync_timeout_seconds", 1.5))
+            results = self._prefetch.get(q, sync_timeout=sync_to)
             if not results:
                 results = self._prefetch.sync(q)
         if not results:
@@ -371,6 +384,14 @@ class GcpMemoryBankProvider(MemoryProvider):
             return
         clean_user = strip_fence(user_content)
         clean_assistant = strip_fence(assistant_content)
+        # Pollution filter — refuse to ingest sub-agent / system prompts that
+        # would otherwise be extracted as bogus "memories" by Gemini.
+        # Observed live: 9 polluted memories on 2026-04-29 from skill-eval
+        # prompts and cron health checks.
+        if self._config.raw.get("pollution_filter", True):
+            if is_pollution(clean_user) or is_pollution(clean_assistant):
+                logger.debug("gmb: skipping turn — matched pollution pattern")
+                return
 
         turn_count = 0
         if self._buffer is not None:
@@ -422,10 +443,22 @@ class GcpMemoryBankProvider(MemoryProvider):
         events = self._buffer.drain() if self._buffer else []
         sess = self._sessions
 
+        # Empty-skip wins over debounce — empty calls cost nothing.
         if not events and (sess is None or sess.event_count == 0):
             if self._config.raw.get("skip_empty_session_end", True):
                 logger.info("gmb: session-end skipped (no events).")
                 return
+
+        # Debounce — skip if we just dispatched a generate within the cooldown.
+        # Without this, multiple Hermes processes / restarts during a storm
+        # fire 8+ parallel generates at the same session and all 429.
+        import time as _t
+        now = _t.monotonic()
+        if (now - self._last_session_end_at) < self._session_end_cooldown_s:
+            logger.info("gmb: session-end debounced (last dispatch %.0fs ago).",
+                        now - self._last_session_end_at)
+            return
+        self._last_session_end_at = now
 
         named_thread(
             self._do_session_end,
@@ -692,16 +725,28 @@ class GcpMemoryBankProvider(MemoryProvider):
     # Internals
     # ------------------------------------------------------------------
     def _fetch_for_prefetch(self, query: str) -> List[Dict[str, Any]]:
+        """Hot-path retrieve called before every turn.
+
+        Critical: this MUST be fast. Hermes blocks on prefetch_all() before
+        sending any user message to the model. We:
+            - Pass no_retry=True so a transient error returns immediately
+              instead of waiting up to ~14s for tenacity backoffs.
+            - Bail early if the breaker is open.
+            - Bail early if the proto client is unavailable.
+        """
         if not self._client or not self._config:
+            return []
+        if self._client.breaker_state == "open":
             return []
         try:
             return self._client.retrieve(
                 scope=self._scope, query=query, top_k=self._config.recall_top_k,
+                no_retry=True,
             )
         except CircuitBreakerOpen:
             return []
         except Exception as e:
-            logger.debug("gcp-memory-bank: prefetch retrieve failed: %s", e)
+            logger.debug("gcp-memory-bank: prefetch retrieve failed (silent): %s", e)
             return []
 
     def _revision_labels(self, *, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -720,29 +765,60 @@ class GcpMemoryBankProvider(MemoryProvider):
         return labels
 
     def _push_instance_config(self) -> None:
+        """Apply ``memory_bank_config`` to the Agent Engine.
+
+        Critical: this used to run on EVERY init (91 calls in 4 days
+        observed). Now we hash the config + cache to disk; we only
+        push if the hash changed OR > 24h elapsed since the last push.
+        Saves Vertex API quota and 1-5s of per-init latency.
+        """
         cfg = self._config
         if cfg is None or self._client is None:
             return
         if not cfg.raw.get("custom_topics_enabled", True):
             return
+
+        body = build_memory_bank_config(
+            project_id=cfg.project,
+            generation_model=str(cfg.raw.get("generation_model")),
+            embedding_model=str(cfg.raw.get("embedding_model")),
+            create_ttl_days=int(cfg.raw.get("create_ttl_days", 365)),
+            generate_created_ttl_days=int(cfg.raw.get("generate_created_ttl_days", 365)),
+            revision_ttl_days=int(cfg.raw.get("revision_ttl_days", 365)),
+            custom_topics=cfg.raw.get("custom_topics"),
+            few_shot_examples_enabled=bool(cfg.raw.get("few_shot_examples_enabled", True)),
+            consolidation_revisions_per_candidate=int(
+                cfg.raw.get("consolidation_revisions_per_candidate", 5)
+            ),
+            enable_third_person_memories=bool(cfg.raw.get("enable_third_person_memories", False)),
+            disable_memory_revisions=bool(cfg.raw.get("disable_memory_revisions", False)),
+        )
+
+        import hashlib, json, time as _t
+        from pathlib import Path
+        body_hash = hashlib.sha256(
+            json.dumps(body, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        marker = (
+            Path(self._hermes_home or os.path.expanduser("~/.hermes"))
+            / ".gmb-sessions" / f"instance-config-{cfg.engine_id}.json"
+        )
+        if marker.exists():
+            try:
+                cached = json.loads(marker.read_text())
+                if (
+                    cached.get("hash") == body_hash
+                    and (_t.time() - float(cached.get("at", 0))) < 86400
+                ):
+                    logger.debug("gmb: instance config cached (skip update).")
+                    return
+            except Exception:
+                pass
         try:
             with timed("agent_engines.update(memory_bank_config)"):
-                body = build_memory_bank_config(
-                    project_id=cfg.project,
-                    generation_model=str(cfg.raw.get("generation_model")),
-                    embedding_model=str(cfg.raw.get("embedding_model")),
-                    create_ttl_days=int(cfg.raw.get("create_ttl_days", 365)),
-                    generate_created_ttl_days=int(cfg.raw.get("generate_created_ttl_days", 365)),
-                    revision_ttl_days=int(cfg.raw.get("revision_ttl_days", 365)),
-                    custom_topics=cfg.raw.get("custom_topics"),
-                    few_shot_examples_enabled=bool(cfg.raw.get("few_shot_examples_enabled", True)),
-                    consolidation_revisions_per_candidate=int(
-                        cfg.raw.get("consolidation_revisions_per_candidate", 5)
-                    ),
-                    enable_third_person_memories=bool(cfg.raw.get("enable_third_person_memories", False)),
-                    disable_memory_revisions=bool(cfg.raw.get("disable_memory_revisions", False)),
-                )
                 self._client.update_engine_config(body)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps({"hash": body_hash, "at": _t.time()}))
         except Exception as e:
             logger.info("gcp-memory-bank: instance config update skipped: %s", e)
 
