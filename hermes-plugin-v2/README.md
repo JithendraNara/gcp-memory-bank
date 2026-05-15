@@ -8,7 +8,7 @@
 
 ```
 google-cloud-aiplatform==1.149.0   # Memory Bank API client + proto definitions
-google-genai==1.73.1               # Gemini API (not used directly by this plugin)
+google-genai==1.73.1               # Gemini synthesis / Memory Bank helper surface
 mistralai==2.4.1                   # Third-party; pins otel-semantic-conventions<0.61
 opentelemetry-api==1.39.1          # Resolved: satisfies mistralai + gcp exporters
 opentelemetry-sdk==1.39.1           # Resolved: satisfies gcp exporters
@@ -43,7 +43,7 @@ Retrieved from `GET /reasoningEngines/4938048007586185216`:
 
 | Area | v1 | v2 |
 |---|---|---|
-| **Tools** | 11 (incl. fake `memory_synthesize`) | 11 (real Gemini synthesis) |
+| **Tools** | 11 (incl. fake `memory_synthesize`) | 12 (adds `memory_profiles`; real Gemini synthesis) |
 | **Tool dispatch** | Flat 300-line if/elif | Dict-of-handlers |
 | **`memory_synthesize`** | `" ".join(facts)` | Real Gemini call (with join fallback) |
 | **`on_memory_write`** | Wrote `[ADD USER.md] ...` polluted facts | Drops the prefix; clean fact text |
@@ -62,14 +62,14 @@ Retrieved from `GET /reasoningEngines/4938048007586185216`:
 | **`agent_context` gate** | Only `primary` checked | Strict skip set: `{cron, flush, subagent}` |
 | **Topic schema** | Already correct (`{managed_topic_enum: ...}`) | Same |
 | **Few-shot examples** | 4 inline (Fort Wayne, etc.) | 5 (added a TECHNICAL_DECISIONS positive) |
-| **CLI** | 12 commands | 14 (adds `audit`, `scope-migrate`, `instance update-config`) |
+| **CLI** | Public top-level command assumption | Internal admin parser only; current top-level `hermes --help` does not expose `hermes gcp-memory-bank` |
 
 ## Module layout
 
 ```
 hermes-plugin-v2/
 ├── plugin.yaml
-├── __init__.py             # GcpMemoryBankProvider — orchestrator (~700 lines)
+├── __init__.py             # GcpMemoryBankProvider orchestrator + MemoryProvider hooks
 ├── config.py               # GmbConfig, scope template, user_id guardrails
 ├── client.py               # Dual-client (proto + vertexai), breaker, tenacity, LRO polling
 ├── topics.py               # 4 managed + 3 custom topics + 5 verified few-shots
@@ -77,11 +77,11 @@ hermes-plugin-v2/
 ├── ingestion.py            # Sliding-window buffer + per-event CreateMemory fallback
 ├── retrieval.py            # PrefetchCache, L0/L1/L2 format, fence + sanitize, trivial skip
 ├── synthesize.py           # REAL Gemini synthesis with join fallback
-├── tools.py                # 11 schemas + dict-dispatch
-├── cli.py                  # 14 subcommands incl. audit + scope-migrate
+├── tools.py                # 12 schemas + dict-dispatch
+├── cli.py                  # internal admin parser; not top-level Hermes CLI
 ├── observability.py        # timed() + ScopeDriftDetector
 └── tests/
-    └── test_provider.py    # 38 tests, no real GCP calls
+    └── test_provider.py    # unit tests, no real GCP calls
 ```
 
 ## Installation — swap from v1
@@ -94,17 +94,14 @@ mv ~/.hermes/plugins/gcp-memory-bank ~/.hermes/plugins/gcp-memory-bank.v1.bak
 ln -s /Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
       ~/.hermes/plugins/gcp-memory-bank
 
-# 3. Verify
-hermes gcp-memory-bank doctor
+# 3. Verify the provider is available/active through Hermes' public CLI
+hermes memory status
+hermes doctor
 
-# 4. Audit existing memories for drift
-hermes gcp-memory-bank audit
+# 4. Audit with targeted scripts or the plugin internals if needed.
+# Current top-level Hermes CLI does not expose `hermes gcp-memory-bank ...`.
 
-# 5. (If needed) consolidate the `8405386815` and `hermes-user` shards
-hermes gcp-memory-bank scope-migrate --from-user hermes-user --to-user jithendra
-hermes gcp-memory-bank scope-migrate --from-user 8405386815 --to-user jithendra --force
-
-# 6. Restart Hermes
+# 5. Restart Hermes
 ```
 
 ## Live audit findings this addresses
@@ -172,7 +169,7 @@ hermes memory status   # shows the active memory provider, including gcp-memory-
 hermes doctor          # Hermes CLI health check; includes active memory-provider diagnostics
 ```
 
-Plugin maintenance commands live in the plugin's own docs/CLI entry points, not as Hermes top-level subcommands. The supported runtime surface for Hermes users is the memory provider itself: `memory_search`, `memory_store`, `memory_profile`, `memory_get`, `memory_delete`, `memory_revisions`, `memory_revision_get`, `memory_rollback`, `memory_purge`, `memory_ingest`, and `memory_synthesize`.
+Plugin maintenance commands live in the plugin's internal `cli.py` parser and are not currently exposed as Hermes top-level subcommands. The supported runtime surface for Hermes users is the memory provider itself: `memory_search`, `memory_store`, `memory_profile`, `memory_profiles`, `memory_get`, `memory_delete`, `memory_revisions`, `memory_revision_get`, `memory_rollback`, `memory_purge`, `memory_ingest`, and `memory_synthesize`.
 
 ## Tools surface
 
@@ -194,7 +191,7 @@ GMB_PLUGIN_DIR=/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
   python3 -m pytest /Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2/tests/ -v
 ```
 
-47 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 11 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker, session-list filtering, transport close cleanup.
+48 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 12 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, structured profiles, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker, session-list filtering, transport close cleanup.
 
 ## SDK quirk reference (preserved from v1's TEST_RESULTS.md)
 
@@ -203,12 +200,12 @@ GMB_PLUGIN_DIR=/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
 | `memories.generate(vertex_session_source=...)` | ✅ Works (sync, 15-35s) |
 | `memories.create(...)` | ✅ Works (immediate) |
 | `memories.generate(direct_contents_source=...)` | ❌ Silently fails — DO NOT USE |
-| `memories.generate(config={"wait_for_completion": False})` | ❌ Returns `done=None`, never processes |
-| `memories.ingest_events(...)` | ❌ Returns `done=None`, never processes |
+| `memories.generate(config={"wait_for_completion": False})` | ⚠️ async behavior is awkward; do not rely on it for production extraction |
+| `memories.ingest_events(...)` | ⚠️ can generate memories with `force_flush`, but observed LRO can remain non-`done` and block disposable engine deletion |
 | `sessions.create(name=engine)` | ✅ Works |
 | `sessions.events.append(...)` | ✅ Works (200-500ms) |
 
-v2 honours these. The only working extraction path is `vertex_session_source`; everything else falls back to per-event `CreateMemory`.
+v2 keeps `vertex_session_source` as the preferred extraction path and falls back to per-event `CreateMemory` for reliability. Do not replace that path with raw `ingest_events` until Google clarifies/fixes the LRO behavior.
 
 ## SDK version + customization features
 
