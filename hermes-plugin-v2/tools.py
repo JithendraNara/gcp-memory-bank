@@ -37,6 +37,19 @@ PROFILE_SCHEMA: Dict[str, Any] = {
     },
 }
 
+STRUCTURED_PROFILES_SCHEMA: Dict[str, Any] = {
+    "name": "memory_profiles",
+    "description": (
+        "Retrieve structured Memory Bank profiles for the active scope. "
+        "Fast, schema-shaped user/environment snapshot; use when stable profile "
+        "fields are more useful than semantic-search snippets."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
 SEARCH_SCHEMA: Dict[str, Any] = {
     "name": "memory_search",
     "description": (
@@ -204,9 +217,9 @@ SYNTHESIZE_SCHEMA: Dict[str, Any] = {
 
 def all_schemas() -> List[Dict[str, Any]]:
     return [
-        PROFILE_SCHEMA, SEARCH_SCHEMA, STORE_SCHEMA, GET_SCHEMA, DELETE_SCHEMA,
-        REVISIONS_SCHEMA, REVISION_GET_SCHEMA, ROLLBACK_SCHEMA, PURGE_SCHEMA,
-        INGEST_SCHEMA, SYNTHESIZE_SCHEMA,
+        PROFILE_SCHEMA, STRUCTURED_PROFILES_SCHEMA, SEARCH_SCHEMA, STORE_SCHEMA,
+        GET_SCHEMA, DELETE_SCHEMA, REVISIONS_SCHEMA, REVISION_GET_SCHEMA,
+        ROLLBACK_SCHEMA, PURGE_SCHEMA, INGEST_SCHEMA, SYNTHESIZE_SCHEMA,
     ]
 
 

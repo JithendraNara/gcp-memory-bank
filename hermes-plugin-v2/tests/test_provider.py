@@ -77,13 +77,17 @@ class FakeClient:
         self._record("create_memory", scope=scope, fact=fact, labels=revision_labels)
         return mem
 
-    def retrieve(self, *, scope, query=None, top_k=8, filter_expr=None):
-        self._record("retrieve", scope=scope, query=query, filter=filter_expr)
+    def retrieve(self, *, scope, query=None, top_k=8, filter_expr=None, no_retry=False):
+        self._record("retrieve", scope=scope, query=query, filter=filter_expr, no_retry=no_retry)
         return [m for m in self.memories if m["scope"] == scope][: top_k or 8]
 
     def list_memories(self, *, filter_expr=None, page_size=100):
         self._record("list_memories", filter=filter_expr)
         return list(self.memories)
+
+    def retrieve_profiles(self, *, scope):
+        self._record("retrieve_profiles", scope=scope)
+        return {"profiles": {"hermes-profile": {"profile": {"communication_style": "direct"}}}}
 
     def get_memory(self, name: str):
         self._record("get_memory", name=name)
@@ -158,6 +162,9 @@ class FakeClient:
     def delete_session(self, name):
         self.sessions = [s for s in self.sessions if s != name]
         self._record("delete_session", name=name)
+
+    def close(self):
+        self._record("close")
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +367,12 @@ class TestTools:
         out = json.loads(p.handle_tool_call("memory_profile", {}))
         assert out["result"]["count"] == 2
 
+    def test_structured_profiles(self, provider):
+        p, fake = provider
+        out = json.loads(p.handle_tool_call("memory_profiles", {}))
+        assert out["result"]["profiles"]["hermes-profile"]["profile"]["communication_style"] == "direct"
+        assert any(c["op"] == "retrieve_profiles" for c in fake.calls)
+
     def test_ingest_uses_fallback(self, provider):
         p, fake = provider
         out = json.loads(p.handle_tool_call("memory_ingest", {
@@ -396,6 +409,36 @@ class TestSyncTurnAndSessions:
         time.sleep(0.4)
         assert any(c["op"] == "create_session" for c in fake.calls)
         assert any(c["op"] == "append_event" for c in fake.calls)
+
+    def test_list_sessions_returns_sessions_and_applies_local_user_filter(self, provider):
+        p, fake = provider
+        # Seed the fake with a few sessions and verify the client returns them
+        # without passing user_id to the API, then filters locally.
+        fake.sessions.extend([
+            "projects/p/locations/us/reasoningEngines/test/sessions/s1",
+            "projects/p/locations/us/reasoningEngines/test/sessions/s2",
+        ])
+        filtered = p._client.list_sessions(user_id="jithendra")
+        all_sessions = p._client.list_sessions()
+        assert len(all_sessions) == 2
+        assert len(filtered) == 2
+        assert any(c["op"] == "list_sessions" and c.get("user_id") is None for c in fake.calls)
+        assert all(s.get("user_id") == "jithendra" or s.get("user_id") is None for s in filtered)
+
+    def test_client_close_calls_transport_close(self):
+        from gcp_memory_bank_v2.client import MemoryBankClient
+
+        calls = []
+
+        class DummyTransport:
+            def close(self):
+                calls.append("closed")
+
+        client = MemoryBankClient(project="p", location="us-central1", engine_id="e")
+        client._vclient = type("V", (), {"transport": DummyTransport()})()
+        client._proto_client = type("P", (), {"transport": DummyTransport()})()
+        client.close()
+        assert calls == ["closed", "closed"]
 
     def test_mid_session_generation_after_n_turns(self, provider):
         p, fake = provider
@@ -543,11 +586,12 @@ class TestCircuitBreaker:
 # Schemas exposed
 # ---------------------------------------------------------------------------
 class TestSchemas:
-    def test_eleven_tools(self):
+    def test_twelve_tools(self):
         from gcp_memory_bank_v2 import all_schemas
         names = [s["name"] for s in all_schemas()]
-        assert len(names) == 11
+        assert len(names) == 12
         assert "memory_synthesize" in names
+        assert "memory_profiles" in names
         assert all(n.startswith("memory_") for n in names)
 
 
@@ -589,6 +633,55 @@ class TestSessionEndDebounce:
         time.sleep(0.3)
         second_count = sum(1 for c in fake.calls if c["op"] == "generate_from_session")
         assert second_count == first_count, "expected debounce to drop second call"
+
+
+class TestContextBudget:
+    """v2.2 — keep per-turn injection small enough that long sessions don't
+    blow Hermes' 50K-token compression threshold."""
+
+    def test_per_turn_injection_under_200_tokens(self, provider):
+        p, fake = provider
+        # Seed an over-consolidated memory like the real engine has.
+        bloated = (
+            "User's technology stack includes Python, TypeScript, React, FastAPI, "
+            "Node.js, PostgreSQL (their favorite database, specifically with the "
+            "pgvector extension), Docker, Cloudflare, Vercel, GCP Cloud Run, and "
+            "MiniMax. | When: 2026-04-25T00:48:28 | Involving: user, assistant | "
+            "Direct answer to user's comparison question"
+        )
+        for fact in [bloated, "Likes WireGuard.", "Prefers tea over coffee.",
+                     "McLaren is favorite car brand.", "Cherry MX Blue keyboard."]:
+            fake.create_memory(scope=p._scope, fact=fact)
+        block = p.prefetch("What's my tech stack?")
+        # Plugin block should stay well under 200 tokens (~800 chars).
+        assert len(block) < 800, f"injection too large: {len(block)} chars"
+        # Metadata suffixes must be stripped.
+        assert "| When:" not in block
+        assert "| Involving:" not in block
+
+    def test_smart_mode_dedupes(self, provider):
+        p, fake = provider
+        for fact in ["A is true.", "B is true.", "C is true."]:
+            fake.create_memory(scope=p._scope, fact=fact)
+        b1 = p.prefetch("query 1")
+        b2 = p.prefetch("query 2 about same topic")
+        # Second call should suppress facts already shown.
+        assert len(b2) < len(b1), f"smart mode didn't dedupe: b1={len(b1)} b2={len(b2)}"
+
+    def test_first_turn_mode_zero_after_first(self, hermes_home):
+        (hermes_home / "gcp-memory-bank.json").write_text(json.dumps({
+            "inject_strategy": "first_turn", "use_gcp_sessions": False,
+        }))
+        fake = FakeClient()
+        with patch.object(gmb, "MemoryBankClient", return_value=fake):
+            p = gmb.GcpMemoryBankProvider()
+            p.initialize(session_id="s", hermes_home=str(hermes_home),
+                         agent_identity="h", user_id="alice")
+            fake.create_memory(scope=p._scope, fact="Hello world.")
+            assert p.prefetch("first") != ""
+            assert p.prefetch("second") == ""
+            assert p.prefetch("third") == ""
+            p.shutdown()
 
 
 class TestThrottleRetry:

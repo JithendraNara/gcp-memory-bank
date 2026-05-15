@@ -31,7 +31,10 @@ import weakref
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .observability import named_thread, timed
+try:  # pragma: no cover
+    from .observability import named_thread, timed
+except Exception:  # pragma: no cover - flat test imports
+    from observability import named_thread, timed
 
 logger = logging.getLogger(__name__)
 

@@ -54,13 +54,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "generate_created_ttl_days": 365,
     "revision_ttl_days": 365,
     # ---- Recall (NEW v2) -------------------------------------------------
+    # Defaults aggressively tuned in v2.2 to keep per-turn cost ~120-180
+    # tokens. Live audit on 2026-04-29 found the prior defaults
+    # (mid + L1 + 1500-token budget) injected ~500 tok/turn, blowing
+    # context past 50K after ~100 turns and triggering Hermes auto-reset.
+    # Override in gcp-memory-bank.json for richer context if your model
+    # has a large window and your sessions are short.
     "recall_mode": "hybrid",          # context | tools | hybrid
-    "recall_budget": "mid",           # low=3 / mid=8 / high=15
-    "recall_detail": "L1",            # L0 fact / L1 +topic+age / L2 +revisions
+    "recall_budget": "low",           # low=3 / mid=8 / high=15  — was mid
+    "recall_detail": "L0",            # L0 bare fact / L1 +topic+age / L2 +revisions  — was L1
     "recall_max_input_chars": 4000,
-    "context_token_budget": 1500,
+    "context_token_budget": 400,      # was 1500 — keeps total injection ~150 tok
+    "max_chars_per_memory": 220,      # NEW v2.2 — truncate each fact (some live ones are 800+ chars)
+    "strip_extraction_metadata": True,  # NEW v2.2 — drop "| When: ... | Involving: ..." trailing junk
+    "inject_strategy": "smart",       # NEW v2.2 — every_turn | smart | first_turn
+    "smart_repeat_window": 5,         # NEW v2.2 — in 'smart' mode, suppress same memory for N turns
     "auto_prefetch": True,
     "prefetch_mode": "facts",         # facts | narrative
+    "prefetch_sync_timeout_seconds": 1.5,
     "trivial_skip": True,
     "pollution_filter": True,         # NEW v2.1 — block sub-agent prompt fragments from extraction
     "session_end_cooldown_seconds": 30, # NEW v2.1 — debounce parallel session-end generates

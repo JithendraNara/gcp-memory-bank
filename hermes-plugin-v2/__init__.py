@@ -44,35 +44,68 @@ except Exception:  # pragma: no cover
         def get_config_schema(self) -> List[Dict[str, Any]]: return []
         def save_config(self, v, h) -> None: ...
 
-from .client import CircuitBreakerOpen, MemoryBankClient
-from .config import (
-    EVENT_BUFFER_LIMIT,
-    GmbConfig,
-    SESSION_TTL_MIN_SECONDS,
-    load_config,
-    save_config_file,
-)
-from .ingestion import EventBuffer, fallback_create_memories, make_event
-from .observability import ScopeDriftDetector, named_thread, timed
-from .retrieval import (
-    PrefetchCache,
-    fence,
-    format_memories,
-    is_pollution,
-    is_trivial,
-    strip_fence,
-    truncate_to_budget,
-)
-from .sessions import GcpSessionMirror
-from .synthesize import synthesize_memories
-from .topics import build_memory_bank_config, resolve_allowed_topics
-from .tools import (
-    ToolDispatcher,
-    all_schemas,
-    schemas_for_mode,
-    tool_error,
-    tool_ok,
-)
+if __package__:
+    from .client import CircuitBreakerOpen, MemoryBankClient
+    from .config import (
+        EVENT_BUFFER_LIMIT,
+        GmbConfig,
+        SESSION_TTL_MIN_SECONDS,
+        load_config,
+        save_config_file,
+    )
+    from .ingestion import EventBuffer, fallback_create_memories, make_event
+    from .observability import ScopeDriftDetector, named_thread, timed
+    from .retrieval import (
+        PrefetchCache,
+        RecentInjectionTracker,
+        fence,
+        format_memories,
+        is_pollution,
+        is_trivial,
+        strip_fence,
+        truncate_to_budget,
+    )
+    from .sessions import GcpSessionMirror
+    from .synthesize import synthesize_memories
+    from .topics import build_memory_bank_config, resolve_allowed_topics
+    from .tools import (
+        ToolDispatcher,
+        all_schemas,
+        schemas_for_mode,
+        tool_error,
+        tool_ok,
+    )
+else:  # pragma: no cover - pytest may import the source file as a flat module
+    from client import CircuitBreakerOpen, MemoryBankClient
+    from config import (
+        EVENT_BUFFER_LIMIT,
+        GmbConfig,
+        SESSION_TTL_MIN_SECONDS,
+        load_config,
+        save_config_file,
+    )
+    from ingestion import EventBuffer, fallback_create_memories, make_event
+    from observability import ScopeDriftDetector, named_thread, timed
+    from retrieval import (
+        PrefetchCache,
+        RecentInjectionTracker,
+        fence,
+        format_memories,
+        is_pollution,
+        is_trivial,
+        strip_fence,
+        truncate_to_budget,
+    )
+    from sessions import GcpSessionMirror
+    from synthesize import synthesize_memories
+    from topics import build_memory_bank_config, resolve_allowed_topics
+    from tools import (
+        ToolDispatcher,
+        all_schemas,
+        schemas_for_mode,
+        tool_error,
+        tool_ok,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +149,8 @@ class GcpMemoryBankProvider(MemoryProvider):
         self._buffer: Optional[EventBuffer] = None
         self._sessions: Optional[GcpSessionMirror] = None
         self._prefetch: Optional[PrefetchCache] = None
+        self._injection_tracker: Optional[RecentInjectionTracker] = None
+        self._first_turn_done: bool = False
         self._dispatcher: Optional[ToolDispatcher] = None
         self._scope_detector = ScopeDriftDetector()
         self._configured_instance: bool = False
@@ -250,9 +285,14 @@ class GcpMemoryBankProvider(MemoryProvider):
             )
 
         self._prefetch = PrefetchCache(fetch_fn=self._fetch_for_prefetch)
+        self._injection_tracker = RecentInjectionTracker(
+            window=int(cfg.raw.get("smart_repeat_window", 5)),
+        )
+        self._first_turn_done = False
 
         self._dispatcher = ToolDispatcher({
             "memory_profile": self._tool_profile,
+            "memory_profiles": self._tool_profiles,
             "memory_search": self._tool_search,
             "memory_store": self._tool_store,
             "memory_get": self._tool_get,
@@ -292,6 +332,11 @@ class GcpMemoryBankProvider(MemoryProvider):
             pass
         if self._prefetch is not None:
             self._prefetch.shutdown()
+        if self._client is not None and hasattr(self._client, "close"):
+            try:
+                self._client.close()
+            except Exception:
+                pass
         self._client = None
 
     # ------------------------------------------------------------------
@@ -339,27 +384,41 @@ class GcpMemoryBankProvider(MemoryProvider):
             return ""
         if cfg.raw.get("trivial_skip", True) and is_trivial(query):
             return ""
+
+        # inject_strategy gating — biggest token saver for long sessions.
+        inject = str(cfg.raw.get("inject_strategy", "smart")).lower()
+        if inject == "first_turn" and self._first_turn_done:
+            return ""
+
         cap = int(cfg.raw.get("recall_max_input_chars", 4000))
         q = (query or "")[:cap]
         results: List[Dict[str, Any]] = []
         if self._prefetch is not None:
-            # Tight timeout — prefetch is on the user-perceived critical path.
-            # Hermes blocks the turn until this returns, so we must be quick.
             sync_to = float(cfg.raw.get("prefetch_sync_timeout_seconds", 1.5))
             results = self._prefetch.get(q, sync_timeout=sync_to)
             if not results:
                 results = self._prefetch.sync(q)
         if not results:
             return ""
+
+        # 'smart' mode — suppress memories already injected in last N turns.
+        if inject == "smart" and self._injection_tracker is not None:
+            results = self._injection_tracker.filter(results)
+        if not results:
+            return ""
+
         body = format_memories(
             results,
-            detail=str(cfg.raw.get("recall_detail", "L1")),
+            detail=str(cfg.raw.get("recall_detail", "L0")),
             max_chars=cfg.context_token_budget * 4,
             style=str(cfg.raw.get("prefetch_mode", "facts")),
+            max_chars_per_memory=int(cfg.raw.get("max_chars_per_memory", 220)),
+            strip_metadata=bool(cfg.raw.get("strip_extraction_metadata", True)),
         )
         body = truncate_to_budget(body, cfg.context_token_budget * 4)
         if not body:
             return ""
+        self._first_turn_done = True
         return fence(body)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -575,6 +634,10 @@ class GcpMemoryBankProvider(MemoryProvider):
         memories = self._client.list_memories(filter_expr=flt, page_size=limit)  # type: ignore[union-attr]
         memories = memories[:limit]
         return tool_ok({"count": len(memories), "memories": memories})
+
+    def _tool_profiles(self, args: Dict[str, Any]) -> str:
+        profiles = self._client.retrieve_profiles(scope=self._scope)  # type: ignore[union-attr]
+        return tool_ok(profiles or {"profiles": {}})
 
     def _tool_search(self, args: Dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()

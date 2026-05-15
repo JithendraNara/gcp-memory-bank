@@ -47,8 +47,11 @@ dev = [
 Homepage = "https://github.com/hermes/gcp-memory-bank"
 Documentation = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank"
 
+[project.scripts]
+deep-research-agent = "deep_research_agent.cli:entrypoint"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/memory_bank"]
+packages = ["src/memory_bank", "src/deep_research_agent"]
 
 [tool.ruff]
 target-version = "py311"

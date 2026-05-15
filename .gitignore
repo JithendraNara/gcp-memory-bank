@@ -79,3 +79,7 @@ secrets.json
 hermes-plugin-v2/__pycache__/
 hermes-plugin-v2/.pytest_cache/
 hermes-plugin-v2/tests/__pycache__/
+
+# Generated Deep Research Agent reports
+reports/deep-research/*.json
+reports/deep-research/*.md

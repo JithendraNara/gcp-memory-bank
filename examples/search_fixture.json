@@ -1,0 +1,16 @@
+{
+  "queries": {
+    "*": [
+      {
+        "title": "Memory-guided research orchestration",
+        "url": "https://example.com/memory-guided-research",
+        "snippet": "A research agent should preserve decisions, citations, and durable memory across runs."
+      },
+      {
+        "title": "Verification-first autonomous research",
+        "url": "https://example.com/verification-first-autonomy",
+        "snippet": "Production research agents need deterministic tests, audit trails, and provider boundaries."
+      }
+    ]
+  }
+}

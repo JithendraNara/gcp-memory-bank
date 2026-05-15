@@ -29,10 +29,18 @@ def _hermes_home() -> str:
     return os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
 
 
-def _build_client():
+if __package__:
     from .client import MemoryBankClient
-    from .config import load_config
+    from .topics import DEFAULT_CUSTOM_TOPICS, MANAGED_TOPICS, build_memory_bank_config
+    from .client import _to_dict as _client_to_dict
+else:  # pragma: no cover - pytest / flat import compatibility
+    from client import MemoryBankClient, _to_dict as _client_to_dict
+    from config import load_config, save_config_file
+    from retrieval import is_pollution
+    from topics import DEFAULT_CUSTOM_TOPICS, MANAGED_TOPICS, build_memory_bank_config
 
+
+def _build_client():
     cfg = load_config(_hermes_home())
     if not cfg.engine_id:
         print("error: engine_id not configured. Run `hermes memory setup`.",
@@ -57,7 +65,6 @@ def _print_json(obj: Any) -> None:
 # Handlers
 # ---------------------------------------------------------------------------
 def _cmd_status(args: argparse.Namespace) -> int:
-    from .config import load_config
     cfg = load_config(_hermes_home())
     print("Provider: gcp-memory-bank v2")
     print(f"Project:  {cfg.project or '(unset)'}")
@@ -72,7 +79,6 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    from .config import load_config
     cfg = load_config(_hermes_home())
     issues: List[str] = []
     ok: List[str] = []
@@ -145,7 +151,6 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_scope(args: argparse.Namespace) -> int:
-    from .config import load_config, save_config_file
     cfg = load_config(_hermes_home())
     if args.set_pairs:
         scope_keys: List[str] = []
@@ -272,7 +277,6 @@ def _cmd_instance_create(args: argparse.Namespace) -> int:
     client, cfg = _build_client()
     if client is None:
         return 1
-    from .topics import build_memory_bank_config
     body = build_memory_bank_config(
         project_id=cfg.project,
         generation_model=str(cfg.raw.get("generation_model")),
@@ -290,7 +294,6 @@ def _cmd_instance_update_config(args: argparse.Namespace) -> int:
     client, cfg = _build_client()
     if client is None:
         return 1
-    from .topics import build_memory_bank_config
     body = build_memory_bank_config(
         project_id=cfg.project,
         generation_model=str(cfg.raw.get("generation_model")),
@@ -310,7 +313,6 @@ def _cmd_instance_update_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_topics_list(args: argparse.Namespace) -> int:
-    from .topics import DEFAULT_CUSTOM_TOPICS, MANAGED_TOPICS
     print("Managed:")
     for t in MANAGED_TOPICS:
         print(f"  - {t}")
@@ -442,7 +444,6 @@ def _cmd_clean_pollution(args: argparse.Namespace) -> int:
     client, _ = _build_client()
     if client is None:
         return 1
-    from .retrieval import is_pollution
     polluted = []
     for m in client.list_memories(page_size=500):
         fact = m.get("fact") or ""
@@ -477,8 +478,7 @@ def _cmd_iam_check(args: argparse.Namespace) -> int:
 
 
 def _to_dict(obj: Any) -> Any:
-    from .client import _to_dict as _td
-    return _td(obj)
+    return _client_to_dict(obj)
 
 
 def _dispatch(args: argparse.Namespace) -> int:

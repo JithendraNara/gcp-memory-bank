@@ -15,7 +15,10 @@ import uuid
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from .observability import timed
+try:  # pragma: no cover
+    from .observability import timed
+except Exception:  # pragma: no cover - flat test imports
+    from observability import timed
 
 logger = logging.getLogger(__name__)
 

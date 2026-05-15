@@ -4,6 +4,23 @@ Production-grade Python SDK for Google Gemini Enterprise Agent Platform **Memory
 
 Provides async-first, type-safe access to managed long-term memory for AI agents with scoped isolation, structured profiles, and comprehensive retrieval strategies.
 
+## Deep Research Agent v0
+
+This repo includes a dependency-light Deep Research Agent scaffold under `src/deep_research_agent/`.
+
+- Core package: `src/deep_research_agent/`
+- CLI: `PYTHONPATH=src python3 -m deep_research_agent.cli --question ... --search-fixture examples/search_fixture.json --output-dir reports/deep-research`
+- Tests: `tests/test_deep_research_agent.py`, `tests/test_deep_research_agent_cli.py`, `tests/test_deep_research_agent_runtime_adapters.py`
+- Runtime adapters: `CallableSearchProvider`, `CitationPreservingSynthesizer`, `normalize_profile_result`, `ProfileAugmentedMemoryStore`, `MemoryPromotionPolicy`, and `PromotingMemoryStore`
+- Demo: `examples/deep_research_agent_demo.py`
+- Design/verification doc: `docs/deep-research-agent-v0.md`
+
+Quick verification:
+
+```bash
+PYTHONPATH=src /Users/jithendranara/.hermes/hermes-agent/venv/bin/python3 -m pytest tests -q
+```
+
 ## What is Memory Bank?
 
 Memory Bank is Google's managed long-term memory service for AI agents (part of the Gemini Enterprise Agent Platform). It:

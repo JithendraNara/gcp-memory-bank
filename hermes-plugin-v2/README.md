@@ -1,6 +1,43 @@
-# gcp-memory-bank — Hermes Plugin v2 (unified)
+# gcp-memory-bank — Hermes Plugin
 
-The unified rewrite that combines the battle-tested v1 SDK reality with all the missing UX, observability, and safety features. **Backwards compatible** with engine `4938048007586185216` and the existing 200+ memories under `{app_name=hermes, user_id=jithendra}`.
+**Plugin:** `~/.hermes/plugins/gcp-memory-bank/__init__.py`
+**Engine:** `4938048007586185216` (`hermes-memory-global-3-1-test`)
+**SDK:** `google-cloud-aiplatform==1.149.0` (Hermes venv at `/Users/jithendranara/.hermes/hermes-agent/venv`)
+
+## Installed Package Versions
+
+```
+google-cloud-aiplatform==1.149.0   # Memory Bank API client + proto definitions
+google-genai==1.73.1               # Gemini API (not used directly by this plugin)
+mistralai==2.4.1                   # Third-party; pins otel-semantic-conventions<0.61
+opentelemetry-api==1.39.1          # Resolved: satisfies mistralai + gcp exporters
+opentelemetry-sdk==1.39.1           # Resolved: satisfies gcp exporters
+opentelemetry-semantic-conventions==0.60b1  # Resolved: satisfies mistralai
+opentelemetry-instrumentation==0.60b1       # + fastapi/asgi/aiohttp-client @ 0.60b1
+opentelemetry-exporter-prometheus==0.60b1
+opentelemetry-exporter-gcp-logging==1.12.0a0
+opentelemetry-resourcedetector-gcp==1.12.0a0
+opentelemetry-exporter-gcp-trace==1.12.0
+```
+
+`pip check` passes cleanly — all constraints satisfied.
+
+## SDK Import Path
+
+The proto classes live here (the `vertexai.types` import from forum posts does NOT exist in 1.149.0):
+
+```python
+from google.cloud.aiplatform_v1beta1.types.reasoning_engine import ReasoningEngineContextSpec
+MemoryBankConfig = ReasoningEngineContextSpec.MemoryBankConfig
+```
+
+## Engine Config (Production)
+
+Retrieved from `GET /reasoningEngines/4938048007586185216`:
+- Generation model: `MiniMax-M2.7` (active, May 2026) | Previously `gemini-3.1-pro-preview`
+- Embedding model: `gemini-embedding-001` (global path)
+- TTL: 365 days
+- Custom topics: `TECHNICAL_DECISIONS`, `PROJECT_CONTEXT`, `CORRECTED_MISTAKES`
 
 ## What changed vs v1
 
@@ -130,21 +167,12 @@ Everything else lives in `~/.hermes/gcp-memory-bank.json`:
 
 ## CLI
 
+```bash
+hermes memory status   # shows the active memory provider, including gcp-memory-bank when selected
+hermes doctor          # Hermes CLI health check; includes active memory-provider diagnostics
 ```
-hermes gcp-memory-bank status
-hermes gcp-memory-bank doctor                # ADC, SDK, engine reachability, dual-provider warning
-hermes gcp-memory-bank audit                 # NEW: scope drift report + leaked sessions
-hermes gcp-memory-bank scope [--set k=tmpl ...]
-hermes gcp-memory-bank scope-migrate --from-user X --to-user Y [--force]   # NEW: re-key memories
-hermes gcp-memory-bank instance describe / create / update-config          # update-config NEW
-hermes gcp-memory-bank topics list
-hermes gcp-memory-bank revisions list MEMORY_ID [--label k=v]
-hermes gcp-memory-bank revisions get MEMORY_ID REVISION_ID
-hermes gcp-memory-bank rollback MEMORY_ID REVISION_ID
-hermes gcp-memory-bank purge --filter EXPR [--force]
-hermes gcp-memory-bank sessions list / delete
-hermes gcp-memory-bank iam check
-```
+
+Plugin maintenance commands live in the plugin's own docs/CLI entry points, not as Hermes top-level subcommands. The supported runtime surface for Hermes users is the memory provider itself: `memory_search`, `memory_store`, `memory_profile`, `memory_get`, `memory_delete`, `memory_revisions`, `memory_revision_get`, `memory_rollback`, `memory_purge`, `memory_ingest`, and `memory_synthesize`.
 
 ## Tools surface
 
@@ -152,11 +180,11 @@ hermes gcp-memory-bank iam check
 |---|---|
 | `memory_search` | Adds `topics` + `since` filter on top of v1 |
 | `memory_store` | Verbatim write |
-| `memory_profile` | Scope-bound list |
+| `memory_profile` / `memory_profiles` | Profile: scope-bound list. **Profiles: structured schema-shaped snapshot** via `retrieve_profiles(...)` (12 tools total) |
 | `memory_get` / `memory_delete` | Unchanged from v1 |
 | `memory_revisions` / `memory_revision_get` / `memory_rollback` | Unchanged |
-| `memory_purge` | Filter is ALWAYS scope-bound when omitted (never cross-user) |
-| `memory_ingest` | Routes through proven CreateMemory fallback (since `ingest_events` SDK is broken) |
+| `memory_purge` | Filter is ALWAYS scope-bound when omitted (never cross-user). **SDK quirk:** `force` must be a top-level kwarg, NOT inside `config` — `config={"force": True}` raises `PurgeAgentEngineMemoriesConfig extra_forbidden` |
+| `memory_ingest` | Routes through proven CreateMemory fallback. ⚠️ `ingest_events(...)` SDK returns a non-cancellable LRO that blocks engine deletion — do not use for production ingestion |
 | `memory_synthesize` | **Real Gemini synthesis** with join fallback |
 
 ## Tests
@@ -166,7 +194,7 @@ GMB_PLUGIN_DIR=/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
   python3 -m pytest /Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2/tests/ -v
 ```
 
-38 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 11 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker.
+47 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 11 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker, session-list filtering, transport close cleanup.
 
 ## SDK quirk reference (preserved from v1's TEST_RESULTS.md)
 
@@ -181,6 +209,78 @@ GMB_PLUGIN_DIR=/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
 | `sessions.events.append(...)` | ✅ Works (200-500ms) |
 
 v2 honours these. The only working extraction path is `vertex_session_source`; everything else falls back to per-event `CreateMemory`.
+
+## SDK version + customization features
+
+**Verified May 5, 2026:** Hermes venv has `google-cloud-aiplatform==1.149.0` installed. Memory Bank TTL / generation-model / embedding-model config classes are available, but **not** through the forum-style `vertexai.types` import path. Use the nested proto classes instead:
+
+```python
+from google.cloud.aiplatform_v1beta1.types.reasoning_engine import ReasoningEngineContextSpec
+from google.protobuf.duration_pb2 import Duration
+
+MemoryBankConfig = ReasoningEngineContextSpec.MemoryBankConfig
+TtlConfig = MemoryBankConfig.TtlConfig
+GenerationConfig = MemoryBankConfig.GenerationConfig
+SimilaritySearchConfig = MemoryBankConfig.SimilaritySearchConfig
+
+memory_bank_config = MemoryBankConfig(
+    ttl_config=TtlConfig(default_ttl=Duration(seconds=2_592_000)),  # 30 days
+    generation_config=GenerationConfig(
+        model="projects/festive-antenna-463514-m8/locations/us-central1/publishers/google/models/gemini-2.5-flash"
+    ),
+    similarity_search_config=SimilaritySearchConfig(
+        embedding_model="projects/festive-antenna-463514-m8/locations/us-central1/publishers/google/models/text-multilingual-embedding-002"
+    ),
+)
+```
+
+Validated locally with `/Users/jithendranara/.hermes/hermes-agent/venv/bin/python3`: `MemoryBankConfig(...)` constructs successfully. Custom topic / few-shot config classes were **not** found in the 1.149.0 Python package under the documented names, so do not wire those into production until the actual SDK symbols are verified.
+
+## REST API endpoint reference
+
+The GCP Memory Bank engine supports a subset of REST API endpoints. Direct REST access is useful for health checks and debugging, but the SDK (`MemoryBankClient`) is the reliable path for all read/write operations.
+
+**Base URL:** `https://us-central1-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/us-central1`
+
+**Supported REST endpoints:**
+
+| Endpoint | Method | Auth | Status |
+|---|---|---|---|
+| `reasoningEngines` (ListEngines) | GET | ADC token | ✅ Works |
+| `reasoningEngines/{id}` (GetEngine) | GET | ADC token | ✅ Works |
+| `reasoningEngines/{id}/memories` (ListMemories) | GET | ADC token | ✅ Works |
+| `sessions` (ListSessions) | GET | ADC token | ✅ Works |
+| `reasoning:searchMemory` | POST | ADC token | ❌ **404 — wrong endpoint path** |
+| `retrieveMemories` (REST) | POST | ADC token | ❌ **404 — use SDK proto path instead** |
+
+**Key insight:** The `reasoning:searchMemory` and bare `retrieveMemories` REST endpoints return 404. The SDK's search works via the **proto/gRPC client** (`MemoryBankServiceClient`), which uses a different transport path. For any health checks that involve search/retrieve, use the SDK:
+
+```python
+from gcp_memory_bank.client import MemoryBankClient
+client = MemoryBankClient(project='...', location='us-central1', engine_id='...')
+results = client.retrieve(scope={...}, query='...', top_k=3)
+```
+
+Or use the plugin tools: `memory_search` (via Hermes tools) which call the SDK correctly.
+
+**Correct REST health check (read-only):**
+```bash
+TOKEN=$(gcloud auth print-access-token)
+ENGINE_ID="4938048007586185216"
+PROJECT_ID="festive-antenna-463514-m8"
+
+# Check engine exists
+curl -s "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/us-central1/reasoningEngines/${ENGINE_ID}" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('Engine:', d.get('displayName',''), '✓')"
+
+curl -s "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/us-central1/reasoningEngines/${ENGINE_ID}/memories?page_size=3" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); [print(' -', m.get('fact','')[:80]) for m in d.get('memories',[])]"
+
+```
+
+**DO NOT use** `reasoning:searchMemory` for REST health checks — it returns 404. The SDK `retrieve()` method works correctly and is the authoritative search path.
 
 ## License
 

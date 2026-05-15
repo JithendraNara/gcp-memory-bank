@@ -356,6 +356,25 @@ class MemoryBankClient:
             out.extend(_normalize_memories(pager))
         return out
 
+    def retrieve_profiles(self, *, scope: Dict[str, str]) -> Dict[str, Any]:
+        """Return structured Memory Profiles for the exact scope.
+
+        Current Agent Platform Memory Bank exposes this as a separate read path
+        from natural-language memories. It is useful for low-latency startup
+        context because the result is already schema-shaped.
+        """
+        c = self._ensure_vclient()
+        try:
+            resp = self._call(
+                c.agent_engines.memories.retrieve_profiles,
+                name=self.engine_name,
+                scope=scope,
+            )
+            return _to_dict(resp)
+        except Exception as e:
+            logger.debug("gcp-memory-bank: retrieve_profiles failed: %s", e)
+            return {"profiles": {}}
+
     def get_memory(self, name: str) -> Optional[Dict[str, Any]]:
         c = self._ensure_vclient()
         try:
@@ -372,11 +391,14 @@ class MemoryBankClient:
     def purge(self, *, filter_expr: str, force: bool = False,
               wait: bool = True) -> Any:
         c = self._ensure_vclient()
+        # Current Vertex AI SDK expects force as a top-level argument; putting
+        # it in config is rejected by PurgeAgentEngineMemoriesConfig.
         return self._call(
             c.agent_engines.memories.purge,
             name=self.engine_name,
             filter=filter_expr,
-            config={"force": bool(force), "wait_for_completion": bool(wait)},
+            force=bool(force),
+            config={"wait_for_completion": bool(wait)},
         )
 
     # ------------------------------------------------------------------
@@ -511,19 +533,36 @@ class MemoryBankClient:
 
     def list_sessions(self, *, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         c = self._ensure_vclient()
-        params: Dict[str, Any] = {"name": self.engine_name}
-        if user_id:
-            params["user_id"] = user_id
         try:
-            pager = self._call(c.agent_engines.sessions.list, **params)
+            pager = self._call(c.agent_engines.sessions.list, name=self.engine_name)
         except Exception as e:
             logger.debug("gcp-memory-bank: list_sessions failed: %s", e)
             return []
-        return [_to_dict(s) for s in (pager if hasattr(pager, "__iter__") else [pager])]
+        out = [_to_dict(s) for s in (pager if hasattr(pager, "__iter__") else [pager])]
+        if user_id:
+            out = [s for s in out if str(s.get("user_id") or "") == str(user_id)]
+        return out
 
     def delete_session(self, session_name: str) -> None:
         c = self._ensure_vclient()
         self._call(c.agent_engines.sessions.delete, name=session_name)
+
+    def close(self) -> None:
+        """Best-effort cleanup for underlying SDK transports."""
+        try:
+            if self._proto_client is not None:
+                transport = getattr(self._proto_client, "transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
+        except Exception:
+            pass
+        try:
+            if self._vclient is not None:
+                transport = getattr(self._vclient, "transport", None)
+                if transport is not None and hasattr(transport, "close"):
+                    transport.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Helpers

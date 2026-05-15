@@ -79,22 +79,62 @@ def truncate_to_budget(text: str, max_chars: int) -> str:
     return cut.rstrip() + "…"
 
 
+_METADATA_SUFFIX_RE = re.compile(
+    r"\s*\|\s*(?:When|Involving|Direct answer|Key|Source|Context):\s*[^|]*",
+    re.IGNORECASE,
+)
+
+
+def _clean_fact(fact: str, *, strip_metadata: bool, max_chars: int) -> str:
+    """Trim a single fact for context injection.
+
+    Removes ``| When: ... | Involving: ... | Direct answer ...`` style
+    suffixes that auto-extraction sometimes appends (observed live), and
+    truncates aggressively long facts (over-consolidated memories grow
+    to 800+ chars over time).
+    """
+    if not fact:
+        return ""
+    text = fact.strip()
+    if strip_metadata:
+        text = _METADATA_SUFFIX_RE.sub("", text).strip()
+    if len(text) > max_chars:
+        cut = text[:max_chars]
+        space = cut.rfind(" ")
+        if space > max_chars * 0.7:
+            cut = cut[:space]
+        text = cut.rstrip(",.; ") + "…"
+    return text
+
+
 def format_memories(
     memories: List[Dict[str, Any]],
     *,
-    detail: str = "L1",
-    max_chars: int = 6000,
+    detail: str = "L0",
+    max_chars: int = 1600,
     style: str = "facts",
+    max_chars_per_memory: int = 220,
+    strip_metadata: bool = True,
 ) -> str:
     if not memories:
         return ""
     if style == "narrative":
-        joined = " ".join(_fact_text(m) for m in memories if _fact_text(m))
+        joined = " ".join(
+            _clean_fact(_fact_text(m), strip_metadata=strip_metadata,
+                        max_chars=max_chars_per_memory)
+            for m in memories if _fact_text(m)
+        )
         return truncate_to_budget(joined, max_chars)
     lines: List[str] = []
     used = 0
     for mem in memories:
-        line = _format_one(mem, detail=detail)
+        # Pre-clean the fact in-place so _format_one operates on the trimmed text.
+        cleaned = _clean_fact(_fact_text(mem), strip_metadata=strip_metadata,
+                              max_chars=max_chars_per_memory)
+        if not cleaned:
+            continue
+        mem_clean = dict(mem); mem_clean["fact"] = cleaned
+        line = _format_one(mem_clean, detail=detail)
         if not line:
             continue
         if used + len(line) > max_chars and lines:
@@ -197,6 +237,48 @@ def _format_age(ts: Any) -> str:
     if secs < 3600: return f"{secs // 60}m ago"
     if secs < 86400: return f"{secs // 3600}h ago"
     return f"{secs // 86400}d ago"
+
+
+# ---------------------------------------------------------------------------
+# RecentInjectionTracker — smart-repeat suppression
+# ---------------------------------------------------------------------------
+class RecentInjectionTracker:
+    """Tracks which memory IDs have been injected recently.
+
+    In 'smart' inject_strategy mode we suppress memories that were already
+    shown to the model in the last N turns — they're already in the model's
+    context, no need to re-inject. This is the biggest token saver for
+    long sessions: a chat that asks the same kind of question repeatedly
+    no longer pays the same 400-token cost every turn.
+    """
+
+    def __init__(self, *, window: int = 5) -> None:
+        self._window = max(1, int(window))
+        # Maps memory_name -> turn_number_when_last_injected
+        self._seen: Dict[str, int] = {}
+        self._turn = 0
+        self._lock = threading.Lock()
+
+    def filter(self, memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        with self._lock:
+            self._turn += 1
+            # Evict entries older than window.
+            cutoff = self._turn - self._window
+            self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+            out: List[Dict[str, Any]] = []
+            for mem in memories:
+                key = str(mem.get("name") or "")
+                if key and key in self._seen:
+                    continue
+                out.append(mem)
+                if key:
+                    self._seen[key] = self._turn
+            return out
+
+    def reset(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._turn = 0
 
 
 # ---------------------------------------------------------------------------

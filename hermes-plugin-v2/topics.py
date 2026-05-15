@@ -45,6 +45,46 @@ DEFAULT_CUSTOM_TOPICS: List[Dict[str, Any]] = [
     },
 ]
 
+DEFAULT_STRUCTURED_SCHEMA: Dict[str, Any] = {
+    "id": "hermes-profile",
+    "memory_schema": {
+        "type": "object",
+        "title": "HermesProfile",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "User's preferred name or full name.",
+                "default": "",
+            },
+            "location": {
+                "type": "string",
+                "description": "Stable user location or timezone when explicitly stated.",
+                "default": "",
+            },
+            "communication_style": {
+                "type": "string",
+                "description": "How the user wants Hermes to communicate.",
+                "default": "",
+            },
+            "technical_stack": {
+                "type": "string",
+                "description": "Comma-separated durable tools, languages, platforms, or cloud stack the user uses.",
+                "default": "",
+            },
+            "active_projects": {
+                "type": "string",
+                "description": "Durable active projects or systems the user repeatedly works on.",
+                "default": "",
+            },
+            "operational_preferences": {
+                "type": "string",
+                "description": "Stable operating rules, scheduling preferences, and automation preferences.",
+                "default": "",
+            },
+        },
+    },
+}
+
 
 # Few-shot examples in the EXACT shape the live SDK accepts.
 # Source: v1 hermes-plugin/__init__.py lines 624-707, verified working.
@@ -128,6 +168,7 @@ def build_memory_bank_config(
     consolidation_revisions_per_candidate: int = 5,
     enable_third_person_memories: bool = False,
     disable_memory_revisions: bool = False,
+    structured_memory_configs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Idempotent ``memory_bank_config`` payload.
 
@@ -180,6 +221,10 @@ def build_memory_bank_config(
     if few_shot_examples_enabled:
         customization["generate_memories_examples"] = list(DEFAULT_FEW_SHOT_EXAMPLES)
     cfg["customization_configs"] = [customization]
+    if structured_memory_configs is None:
+        structured_memory_configs = [{"schema_configs": [DEFAULT_STRUCTURED_SCHEMA]}]
+    if structured_memory_configs:
+        cfg["structured_memory_configs"] = structured_memory_configs
     return cfg
 
 
