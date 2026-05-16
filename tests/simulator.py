@@ -14,13 +14,15 @@ Run: python simulator.py
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import threading
 from typing import Any, Dict, List, Optional
 
-# Ensure hermes-agent is importable
-sys.path.insert(0, "/Users/jithendranara/.hermes/hermes-agent")
+# Optional: point this at a local hermes-agent checkout for live simulation.
+if os.environ.get("HERMES_AGENT_DIR"):
+    sys.path.insert(0, os.environ["HERMES_AGENT_DIR"])
 
 from plugins.memory import load_memory_provider
 
@@ -170,7 +172,7 @@ def run_simulation():
     print("SESSION 1: Getting to know the user")
     print("-" * 60)
 
-    sim.turn("Hey, I'm Jithendra. I live in Fort Wayne, Indiana.")
+    sim.turn("Hey, I'm Demo User. I live in Fort Wayne, Indiana.")
     sim.turn("I have a golden retriever named Max.")
     sim.turn("I'm learning Python and AI development.")
     sim.turn("What should I work on today?")  # Generic, no memory hit yet
@@ -209,7 +211,7 @@ def run_simulation():
     # Repeat same facts — should deduplicate
     sim3.turn("I live in Fort Wayne, Indiana.")
     sim3.turn("I live in Fort Wayne, Indiana.")
-    sim3.turn("My name is Jithendra.")
+    sim3.turn("My name is Demo User.")
 
     sim3.end_session()
 

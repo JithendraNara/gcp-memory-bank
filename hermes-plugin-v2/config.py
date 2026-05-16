@@ -46,8 +46,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "scope_includes_session": False,
     # ---- Models ----------------------------------------------------------
-    "generation_model": "gemini-3.1-pro-preview",
-    "embedding_model": "gemini-embedding-001",
+    # Current Google Memory Bank defaults. Keep synthesis separate because it
+    # is a Hermes-side summarization call, not Memory Bank extraction config.
+    "generation_model": "gemini-2.5-flash",
+    "embedding_model": "text-embedding-005",
     "synthesis_model": "gemini-2.5-flash",       # Used by memory_synthesize tool.
     # ---- TTL -------------------------------------------------------------
     "create_ttl_days": 365,
@@ -265,12 +267,14 @@ def load_config(hermes_home: str) -> GmbConfig:
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("gcp-memory-bank: bad config at %s: %s", path, e)
 
-    # Env overrides.
+    # Env overrides. Do not consume GOOGLE_CLOUD_LOCATION here: this machine
+    # uses GOOGLE_CLOUD_LOCATION=global for Gemini/Vertex model calls, while
+    # Memory Bank reasoning engines are regional.
     for env_key, cfg_key in (
         ("GCP_PROJECT_ID", "project_id"),
         ("GOOGLE_CLOUD_PROJECT", "project_id"),
+        ("GCP_MEMORY_LOCATION", "location"),
         ("GCP_LOCATION", "location"),
-        ("GOOGLE_CLOUD_LOCATION", "location"),
         ("GCP_MEMORY_ENGINE", "engine_id"),
         ("GOOGLE_CLOUD_AGENT_ENGINE_ID", "engine_id"),
     ):

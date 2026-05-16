@@ -6,7 +6,7 @@ HERMES_MEMORY_CONFIG (technical_decisions, project_context, corrected_mistakes).
 
 The schema shape ``{"managed_memory_topic": {"managed_topic_enum": ...}}`` is
 what the live SDK actually accepts — verified against engine
-``4938048007586185216``.
+``YOUR_ENGINE_ID``.
 """
 
 from __future__ import annotations
@@ -158,8 +158,8 @@ DEFAULT_FEW_SHOT_EXAMPLES: List[Dict[str, Any]] = [
 def build_memory_bank_config(
     *,
     project_id: str,
-    generation_model: str = "gemini-3.1-pro-preview",
-    embedding_model: str = "gemini-embedding-001",
+    generation_model: str = "gemini-2.5-flash",
+    embedding_model: str = "text-embedding-005",
     create_ttl_days: int = 365,
     generate_created_ttl_days: int = 365,
     revision_ttl_days: int = 365,

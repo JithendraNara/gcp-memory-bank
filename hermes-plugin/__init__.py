@@ -170,7 +170,7 @@ PURGE_SCHEMA = {
         "properties": {
             "filter": {
                 "type": "string",
-                "description": "Optional EBNF filter string (e.g. 'scope.user_id=\"jithendra\"'). If omitted, scopes to current user/app automatically.",
+                "description": "Optional EBNF filter string (e.g. 'scope.user_id=\"demo-user\"'). If omitted, scopes to current user/app automatically.",
             },
         },
         "required": [],

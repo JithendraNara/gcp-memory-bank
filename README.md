@@ -1,8 +1,25 @@
 # gcp-memory-bank
 
-Production-grade Python SDK for Google Gemini Enterprise Agent Platform **Memory Bank**.
+Production-grade Python SDK and Hermes memory-provider plugin for Google Gemini Enterprise Agent Platform **Memory Bank**.
 
-Provides async-first, type-safe access to managed long-term memory for AI agents with scoped isolation, structured profiles, and comprehensive retrieval strategies.
+Provides async-first, type-safe access to managed long-term memory for AI agents with scoped isolation, structured profiles, GCP Sessions-backed extraction, and production-oriented Hermes integration.
+
+## Implementation Overview
+
+This repo contains a complete agent-memory stack:
+
+- A reusable Python SDK under `src/memory_bank/`.
+- A Hermes MemoryProvider plugin under `hermes-plugin-v2/`.
+- GCP Sessions mirroring for turn events, with Memory Bank extraction from session history.
+- Structured profile retrieval for stable user/project facts.
+- Profile-isolated config, admin CLI commands, circuit breakers, retry handling, and non-blocking hook behavior.
+- Offline tests plus live-verification guidance that does not require committing credentials.
+
+Start here:
+
+- `docs/hermes-memory-bank-implementation.md` — architecture, operational boundaries, verification, and security posture.
+- `docs/gcp-sessions-adaptation-plan.md` — current plan for tightening GCP Sessions around Hermes session lineage.
+- `hermes-plugin-v2/README.md` — implementation details for the active Hermes provider.
 
 ## Deep Research Agent v0
 
@@ -18,7 +35,7 @@ This repo includes a dependency-light Deep Research Agent scaffold under `src/de
 Quick verification:
 
 ```bash
-PYTHONPATH=src /Users/jithendranara/.hermes/hermes-agent/venv/bin/python3 -m pytest tests -q
+PYTHONPATH=src python3 -m pytest tests -q
 ```
 
 ## What is Memory Bank?
@@ -70,7 +87,7 @@ async def main():
         engine = await client.create_instance(MemoryBankConfig())
         
         manager = MemoryManager(client)
-        scope = build_scope(user_id="jithendra")
+        scope = build_scope(user_id="demo-user")
         
         # Generate memories from conversation
         events = [
@@ -226,13 +243,13 @@ Memories are strictly isolated by **scope** — a dict of up to 5 key-value pair
 
 ```python
 # Broad
-{"user_id": "jithendra"}
+{"user_id": "demo-user"}
 
 # Narrow
-{"user_id": "jithendra", "project": "openclaw"}
+{"user_id": "demo-user", "project": "example-agent"}
 
 # Agent-specific
-{"user_id": "jithendra", "agent": "hermes"}
+{"user_id": "demo-user", "agent": "hermes"}
 ```
 
 **Rule:** Only memories with the **exact same scope** are consolidated or retrieved together.

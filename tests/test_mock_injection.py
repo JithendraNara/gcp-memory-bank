@@ -153,13 +153,13 @@ class TestMockInjection:
 
     def test_memory_injected_into_prompt(self, store, injector):
         """Memories should be formatted and appended to system prompt."""
-        store.create_memory("user_1", "User's name is Jithendra.")
+        store.create_memory("user_1", "User's name is Demo User.")
         store.create_memory("user_1", "User lives in Fort Wayne, Indiana.")
 
         ctx = injector.inject("user_1", "You are helpful.")
 
         assert ctx.memory_count == 2
-        assert "User's name is Jithendra." in ctx.system_prefix
+        assert "User's name is Demo User." in ctx.system_prefix
         assert "Fort Wayne, Indiana." in ctx.system_prefix
         assert "## User Context" in ctx.system_prefix
 
@@ -188,13 +188,13 @@ class TestMockInjection:
 
     def test_agent_uses_injected_memory(self, store, injector):
         """MockAgent should answer correctly when memories are injected."""
-        store.create_memory("jithendra", "User's name is Jithendra.")
-        store.create_memory("jithendra", "User lives in Fort Wayne, Indiana.")
-        store.create_memory("jithendra", "User enjoys hiking at Indiana Dunes.")
+        store.create_memory("demo-user", "User's name is Demo User.")
+        store.create_memory("demo-user", "User lives in Fort Wayne, Indiana.")
+        store.create_memory("demo-user", "User enjoys hiking at Indiana Dunes.")
 
-        agent = MockAgent(injector, "jithendra")
+        agent = MockAgent(injector, "demo-user")
 
-        assert "Jithendra" in agent.ask("What is my name?")
+        assert "Demo User" in agent.ask("What is my name?")
         assert "Fort Wayne" in agent.ask("Where do I live?")
         assert "hiking" in agent.ask("What do I enjoy doing?")
 
@@ -246,12 +246,12 @@ class TestEndToEndScenario:
         user_id = "jithsss_telegram"
 
         # --- Session 1: Initial facts ---
-        store.create_memory(user_id, "User's name is Jithendra.")
+        store.create_memory(user_id, "User's name is Demo User.")
         store.create_memory(user_id, "User lives in Fort Wayne, Indiana.")
 
         agent = MockAgent(injector, user_id)
         resp1 = agent.ask("What is my name?")
-        assert "Jithendra" in resp1
+        assert "Demo User" in resp1
 
         # Agent learns something new
         store.create_memory(user_id, "User prefers dark mode in all applications.")
@@ -260,7 +260,7 @@ class TestEndToEndScenario:
         agent2 = MockAgent(injector, user_id)
         assert "dark mode" in agent2.context.system_prefix
         resp2 = agent2.ask("What is my name?")
-        assert "Jithendra" in resp2
+        assert "Demo User" in resp2
 
         # Verify all 3 memories are present
         assert agent2.context.memory_count == 3

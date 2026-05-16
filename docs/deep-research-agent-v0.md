@@ -63,21 +63,21 @@ PYTHONPATH=src python3 -m pytest tests/test_deep_research_agent.py tests/test_de
 Local full-suite command, using the Hermes venv because system Python lacks project dependencies:
 
 ```bash
-PYTHONPATH=src /Users/jithendranara/.hermes/hermes-agent/venv/bin/python3 -m pytest tests -q
+PYTHONPATH=src python3 -m pytest tests -q
 # 40 passed, 1 warning in 1.45s
 ```
 
 HP/HermesBox targeted command:
 
 ```bash
-/Users/jithendranara/.hermes/tools/hermes_box.py run --repo /Users/jithendranara/projects/gcp-memory-bank -- scripts/run_deep_research_agent_tests.sh
+~/.hermes/tools/hermes_box.py run --repo /path/to/gcp-memory-bank -- scripts/run_deep_research_agent_tests.sh
 # 17 passed, 1 warning in 0.05s
 ```
 
 HP/HermesBox full-suite command after creating `.venv` and installing project test/runtime deps on HP:
 
 ```bash
-/Users/jithendranara/.hermes/tools/hermes_box.py run --repo /Users/jithendranara/projects/gcp-memory-bank -- scripts/run_all_tests.sh
+~/.hermes/tools/hermes_box.py run --repo /path/to/gcp-memory-bank -- scripts/run_all_tests.sh
 # 37 passed, 22 warnings in 3.18s
 ```
 

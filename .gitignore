@@ -73,6 +73,8 @@ Thumbs.db
 *.key
 *.pem
 .env.local
+gcp-memory-bank.json
+config.yaml
 service-account*.json
 *credentials*.json
 secrets.json

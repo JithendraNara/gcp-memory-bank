@@ -16,6 +16,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import json
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -126,6 +129,19 @@ def _retry(fn: Callable, *args: Any, attempts: int = 3, **kwargs: Any) -> Any:
     return decorator(fn)(*args, **kwargs)
 
 
+def _snake_to_camel(obj: Any) -> Any:
+    if isinstance(obj, list):
+        return [_snake_to_camel(v) for v in obj]
+    if isinstance(obj, dict):
+        return {_camel_key(str(k)): _snake_to_camel(v) for k, v in obj.items()}
+    return obj
+
+
+def _camel_key(key: str) -> str:
+    parts = key.split("_")
+    return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:])
+
+
 class MemoryBankClient:
     """All Memory Bank + Sessions traffic flows through this class."""
 
@@ -222,11 +238,69 @@ class MemoryBankClient:
 
     def update_engine_config(self, memory_bank_config: Dict[str, Any]) -> Any:
         c = self._ensure_vclient()
-        return self._call(
-            c.agent_engines.update,
-            name=self.engine_name,
-            config={"context_spec": {"memory_bank_config": memory_bank_config}},
+        try:
+            return self._call(
+                c.agent_engines.update,
+                name=self.engine_name,
+                config={"context_spec": {"memory_bank_config": memory_bank_config}},
+            )
+        except Exception as e:
+            msg = str(e)
+            if "404" not in msg and "NOT_FOUND" not in msg:
+                raise
+            logger.warning(
+                "gcp-memory-bank: SDK agent_engines.update failed with NOT_FOUND; "
+                "retrying via REST PATCH."
+            )
+            return self._update_engine_config_rest(memory_bank_config)
+
+    def _update_engine_config_rest(self, memory_bank_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback for SDK project-number lookup drift seen in May 2026.
+
+        The REST endpoint accepts the same engine under the configured project
+        id even when the high-level SDK resolves a project number that returns
+        NOT_FOUND for update.
+        """
+        try:
+            import google.auth  # type: ignore
+            from google.auth.transport.requests import Request  # type: ignore
+        except ImportError as e:  # pragma: no cover - runtime dependency
+            raise RuntimeError("gcp-memory-bank: google-auth not installed for REST fallback") from e
+
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
+        creds.refresh(Request())
+        token = getattr(creds, "token", "")
+        if not token:
+            raise RuntimeError("gcp-memory-bank: ADC token unavailable for REST fallback")
+
+        url = (
+            f"https://{self.location}-aiplatform.googleapis.com/v1beta1/"
+            f"{self.engine_name}?updateMask=context_spec.memory_bank_config"
+        )
+        body = {
+            "contextSpec": {
+                "memoryBankConfig": _snake_to_camel(memory_bank_config),
+            },
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="PATCH",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"gcp-memory-bank: REST engine config update failed: {e.code} {detail}"
+            ) from e
 
     def create_engine(self, memory_bank_config: Optional[Dict[str, Any]] = None,
                       display_name: str = "hermes-memory-bank") -> Any:

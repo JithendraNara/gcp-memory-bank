@@ -379,6 +379,6 @@ def register_cli(subparser) -> None:
 
     purge_parser = subs.add_parser("purge", help="Delete memories matching filter (requires --force)")
     purge_parser.add_argument("--force", action="store_true", help="Confirm deletion")
-    purge_parser.add_argument("--filter", type=str, default="", help="Optional EBNF filter string (e.g. scope.user_id=\"jithendra\")")
+    purge_parser.add_argument("--filter", type=str, default="", help="Optional EBNF filter string (e.g. scope.user_id=\"demo-user\")")
 
     subparser.set_defaults(func=_dispatch)

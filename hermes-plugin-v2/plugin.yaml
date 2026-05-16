@@ -1,5 +1,5 @@
 name: gcp-memory-bank
-version: 2.0.0
+version: 2.2.0
 description: "Google Cloud Agent Platform Memory Bank — unified Hermes provider. Battle-tested vertex_session_source path + recall_mode/budget/fence/observability + real LLM synthesis + scope-drift safety. Backwards compatible with v1 config and scopes."
 pip_dependencies:
   - google-cloud-aiplatform>=1.148.0

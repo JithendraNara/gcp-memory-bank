@@ -1,8 +1,8 @@
 # gcp-memory-bank — Hermes Plugin
 
 **Plugin:** `~/.hermes/plugins/gcp-memory-bank/__init__.py`
-**Engine:** `4938048007586185216` (`hermes-memory-global-3-1-test`)
-**SDK:** `google-cloud-aiplatform==1.149.0` (Hermes venv at `/Users/jithendranara/.hermes/hermes-agent/venv`)
+**Engine:** `YOUR_ENGINE_ID`
+**SDK:** `google-cloud-aiplatform==1.149.0`
 
 ## Installed Package Versions
 
@@ -33,9 +33,9 @@ MemoryBankConfig = ReasoningEngineContextSpec.MemoryBankConfig
 
 ## Engine Config (Production)
 
-Retrieved from `GET /reasoningEngines/4938048007586185216`:
-- Generation model: `MiniMax-M2.7` (active, May 2026) | Previously `gemini-3.1-pro-preview`
-- Embedding model: `gemini-embedding-001` (global path)
+Retrieved from `GET /reasoningEngines/YOUR_ENGINE_ID`:
+- Generation model: `gemini-2.5-flash` (Google Memory Bank default)
+- Embedding model: `text-embedding-005` (Google Memory Bank default)
 - TTL: 365 days
 - Custom topics: `TECHNICAL_DECISIONS`, `PROJECT_CONTEXT`, `CORRECTED_MISTAKES`
 
@@ -50,7 +50,7 @@ Retrieved from `GET /reasoningEngines/4938048007586185216`:
 | **`generate_every_n_turns`** | `0` (mid-session generation OFF) | `3` by default |
 | **Session reuse** | New session every 18s observed | Reuses one session per process; atexit cleanup |
 | **Empty session-end** | Burns a round-trip on (0 events, 0 turns) | Skipped by default |
-| **`user_id`** | Accepted raw chat ids (Telegram `8405386815` leaked) | Refuses numeric-only ids; logs migration warning |
+| **`user_id`** | Accepted raw chat ids (Telegram `1234567890` leaked) | Refuses numeric-only ids; logs migration warning |
 | **Scope drift** | Silent — 3 user_ids and 3 engines accumulated | `ScopeDriftDetector` warns on every change |
 | **Recall modes** | Always-on prefetch | `recall_mode ∈ {context, tools, hybrid}` |
 | **Recall budget** | Hardcoded `top_k=8` | `low/mid/high` → 3/8/15 |
@@ -62,7 +62,7 @@ Retrieved from `GET /reasoningEngines/4938048007586185216`:
 | **`agent_context` gate** | Only `primary` checked | Strict skip set: `{cron, flush, subagent}` |
 | **Topic schema** | Already correct (`{managed_topic_enum: ...}`) | Same |
 | **Few-shot examples** | 4 inline (Fort Wayne, etc.) | 5 (added a TECHNICAL_DECISIONS positive) |
-| **CLI** | Public top-level command assumption | Internal admin parser only; current top-level `hermes --help` does not expose `hermes gcp-memory-bank` |
+| **CLI** | Public top-level command assumption | Honcho-style admin CLI: `--target-profile`, profile-local config read/write, status across profiles |
 
 ## Module layout
 
@@ -78,7 +78,7 @@ hermes-plugin-v2/
 ├── retrieval.py            # PrefetchCache, L0/L1/L2 format, fence + sanitize, trivial skip
 ├── synthesize.py           # REAL Gemini synthesis with join fallback
 ├── tools.py                # 12 schemas + dict-dispatch
-├── cli.py                  # internal admin parser; not top-level Hermes CLI
+├── cli.py                  # Honcho-style admin parser; profile-aware config/status/ops
 ├── observability.py        # timed() + ScopeDriftDetector
 └── tests/
     └── test_provider.py    # unit tests, no real GCP calls
@@ -91,15 +91,16 @@ hermes-plugin-v2/
 mv ~/.hermes/plugins/gcp-memory-bank ~/.hermes/plugins/gcp-memory-bank.v1.bak
 
 # 2. Install v2 (symlink keeps the projects/ checkout authoritative)
-ln -s /Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
+ln -s /path/to/gcp-memory-bank/hermes-plugin-v2 \
       ~/.hermes/plugins/gcp-memory-bank
 
 # 3. Verify the provider is available/active through Hermes' public CLI
 hermes memory status
 hermes doctor
 
-# 4. Audit with targeted scripts or the plugin internals if needed.
-# Current top-level Hermes CLI does not expose `hermes gcp-memory-bank ...`.
+# 4. Audit with the plugin CLI when gcp-memory-bank is the active provider
+hermes gcp-memory-bank status
+hermes gcp-memory-bank config path
 
 # 5. Restart Hermes
 ```
@@ -108,7 +109,7 @@ hermes doctor
 
 From the runtime log scan (4 days, 91 inits):
 
-- ✅ **3 different `user_id` values** — `hermes-user`, `8405386815` (Telegram chat id), `jithendra`. v2's `resolve_user_id` rejects numeric-only ids; `scope-migrate` CLI re-keys old memories.
+- ✅ **3 different `user_id` values** — `hermes-user`, `1234567890` (Telegram chat id), `demo-user`. v2's `resolve_user_id` rejects numeric-only ids; `scope-migrate` CLI re-keys old memories.
 - ✅ **18 sessions created, 11 ended, 7 leaked**. v2 `session_reuse=true` keeps one session per process; `atexit` flushes; `skip_empty_session_end=true` skips the 2/11 wasted round-trips.
 - ✅ **Tools never invoked** in 4 days. v2 `system_prompt_block` rewords the tool guidance to "Use memory_search FIRST when the user references past context."
 - ✅ **`memory_synthesize` was fake**. v2 calls Gemini for real (with join fallback if google-genai isn't installed).
@@ -130,15 +131,24 @@ Wizard-prompted (minimal):
 | `user_id` | — | If empty, resolved from kwargs but **rejects numeric-only** |
 | `app_name` | `hermes` | |
 
+Environment override note: use `GCP_MEMORY_LOCATION` for this plugin. It
+intentionally ignores `GOOGLE_CLOUD_LOCATION` because that variable is commonly
+set to `global` for Gemini model calls, while Memory Bank engines are regional.
+
+The setup schema is intentionally minimal per Hermes MemoryProvider guidance.
+Advanced options below are read from `$HERMES_HOME/gcp-memory-bank.json` and are
+not prompted in `hermes memory setup`.
+
 Everything else lives in `~/.hermes/gcp-memory-bank.json`:
 
 | Key | Default |
 |---|---|
 | `scope_keys` | `["app_name", "user_id"]` |
 | `scope_template` | `{"app_name":"{app}", "user_id":"{user}"}` |
+| `scope_includes_session` | `false` |
 | `recall_mode` | `hybrid` |
-| `recall_budget` | `mid` (top_k=8) |
-| `recall_detail` | `L1` |
+| `recall_budget` | `low` (top_k=3) |
+| `recall_detail` | `L0` |
 | `trivial_skip` | `true` |
 | `auto_prefetch` | `true` |
 | `prefetch_mode` | `facts` |
@@ -147,8 +157,8 @@ Everything else lives in `~/.hermes/gcp-memory-bank.json`:
 | `session_reuse` | `true` |
 | `skip_empty_session_end` | `true` |
 | `generate_every_n_turns` | `3` |
-| `generation_model` | `gemini-3.1-pro-preview` |
-| `embedding_model` | `gemini-embedding-001` |
+| `generation_model` | `gemini-2.5-flash` |
+| `embedding_model` | `text-embedding-005` |
 | `synthesis_model` | `gemini-2.5-flash` |
 | `create_ttl_days` / `generate_created_ttl_days` / `revision_ttl_days` | `365` |
 | `circuit_breaker.threshold` / `cooldown_seconds` | `5` / `120` |
@@ -167,9 +177,15 @@ Everything else lives in `~/.hermes/gcp-memory-bank.json`:
 ```bash
 hermes memory status   # shows the active memory provider, including gcp-memory-bank when selected
 hermes doctor          # Hermes CLI health check; includes active memory-provider diagnostics
+hermes gcp-memory-bank status --all
+hermes gcp-memory-bank --target-profile default config show --effective
+hermes gcp-memory-bank --target-profile research config set user_id demo-user
+hermes gcp-memory-bank --target-profile research config unset scope_template.workspace
 ```
 
-Plugin maintenance commands live in the plugin's internal `cli.py` parser and are not currently exposed as Hermes top-level subcommands. The supported runtime surface for Hermes users is the memory provider itself: `memory_search`, `memory_store`, `memory_profile`, `memory_profiles`, `memory_get`, `memory_delete`, `memory_revisions`, `memory_revision_get`, `memory_rollback`, `memory_purge`, `memory_ingest`, and `memory_synthesize`.
+Plugin maintenance commands follow the bundled Honcho CLI shape: global `--target-profile` selects a profile's `$HERMES_HOME/gcp-memory-bank.json` without switching the active profile; `config path/show/set/unset` reads and writes that profile-local config file.
+
+The supported runtime tool surface for Hermes users is the memory provider itself: `memory_search`, `memory_store`, `memory_profile`, `memory_profiles`, `memory_get`, `memory_delete`, `memory_revisions`, `memory_revision_get`, `memory_rollback`, `memory_purge`, `memory_ingest`, and `memory_synthesize`.
 
 ## Tools surface
 
@@ -187,11 +203,49 @@ Plugin maintenance commands live in the plugin's internal `cli.py` parser and ar
 ## Tests
 
 ```bash
-GMB_PLUGIN_DIR=/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2 \
-  python3 -m pytest /Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2/tests/ -v
+GMB_PLUGIN_DIR=/path/to/gcp-memory-bank/hermes-plugin-v2 \
+  python3 -m pytest /path/to/gcp-memory-bank/hermes-plugin-v2/tests/ -v
 ```
 
-48 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 12 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, structured profiles, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker, session-list filtering, transport close cleanup.
+56 tests: identity, availability, user_id guardrails, scope drift, fence + sanitize, trivial skip, agent_context gating, all 12 tools, sync_turn non-blocking, mid-session generation, session-end (incl. empty-skip), pre-compress, on_memory_write (no prefix), real synthesize fallback, structured profiles, topic build (correct nested schema), system prompt, recall_mode gating, circuit breaker, session-list filtering, transport close cleanup, MemoryManager docs-pattern flow, and profile-aware CLI config read/write.
+
+## Profile / workspace isolation
+
+Hermes passes `hermes_home` into memory providers, and this plugin reads
+`$HERMES_HOME/gcp-memory-bank.json` plus stores transient session mirrors under
+`$HERMES_HOME/.gmb-sessions/`. That keeps config and local session state scoped
+to the active Hermes profile.
+
+GCP Memory Bank itself isolates durable records by exact `scope`. The default
+scope is intentionally stable and backwards compatible:
+
+```json
+{
+  "scope_keys": ["app_name", "user_id"],
+  "scope_template": {
+    "app_name": "{app}",
+    "user_id": "{user}"
+  }
+}
+```
+
+For Hindsight-style profile or workspace partitioning, add another scope key
+instead of changing `user_id`. Supported placeholders are `{app}`, `{user}`,
+`{profile}`, `{workspace}`, `{platform}`, and `{session}`. Example:
+
+```json
+{
+  "scope_keys": ["app_name", "user_id", "profile"],
+  "scope_template": {
+    "app_name": "{app}",
+    "user_id": "{user}",
+    "profile": "{profile}"
+  }
+}
+```
+
+Do not change active scope lightly: exact-scope retrieval means old memories stay
+under the previous scope unless migrated or queried explicitly.
 
 ## SDK quirk reference (preserved from v1's TEST_RESULTS.md)
 
@@ -223,15 +277,15 @@ SimilaritySearchConfig = MemoryBankConfig.SimilaritySearchConfig
 memory_bank_config = MemoryBankConfig(
     ttl_config=TtlConfig(default_ttl=Duration(seconds=2_592_000)),  # 30 days
     generation_config=GenerationConfig(
-        model="projects/festive-antenna-463514-m8/locations/us-central1/publishers/google/models/gemini-2.5-flash"
+        model="projects/YOUR_PROJECT_ID/locations/us-central1/publishers/google/models/gemini-2.5-flash"
     ),
     similarity_search_config=SimilaritySearchConfig(
-        embedding_model="projects/festive-antenna-463514-m8/locations/us-central1/publishers/google/models/text-multilingual-embedding-002"
+        embedding_model="projects/YOUR_PROJECT_ID/locations/us-central1/publishers/google/models/text-embedding-005"
     ),
 )
 ```
 
-Validated locally with `/Users/jithendranara/.hermes/hermes-agent/venv/bin/python3`: `MemoryBankConfig(...)` constructs successfully. Custom topic / few-shot config classes were **not** found in the 1.149.0 Python package under the documented names, so do not wire those into production until the actual SDK symbols are verified.
+Validated locally with `python3`: `MemoryBankConfig(...)` constructs successfully. Custom topic / few-shot config classes were **not** found in the 1.149.0 Python package under the documented names, so do not wire those into production until the actual SDK symbols are verified.
 
 ## REST API endpoint reference
 
@@ -263,8 +317,8 @@ Or use the plugin tools: `memory_search` (via Hermes tools) which call the SDK c
 **Correct REST health check (read-only):**
 ```bash
 TOKEN=$(gcloud auth print-access-token)
-ENGINE_ID="4938048007586185216"
-PROJECT_ID="festive-antenna-463514-m8"
+ENGINE_ID="YOUR_ENGINE_ID"
+PROJECT_ID="YOUR_PROJECT_ID"
 
 # Check engine exists
 curl -s "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/us-central1/reasoningEngines/${ENGINE_ID}" \

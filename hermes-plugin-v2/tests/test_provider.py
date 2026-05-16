@@ -13,6 +13,7 @@ import json
 import shutil
 import sys
 import tempfile
+import types
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -26,7 +27,7 @@ import pytest
 import os as _os
 PLUGIN_DIR = Path(_os.environ.get(
     "GMB_PLUGIN_DIR",
-    "/Users/jithendranara/projects/gcp-memory-bank/hermes-plugin-v2",
+    str(Path(__file__).resolve().parents[1]),
 )).resolve()
 
 _pkg_root = Path(tempfile.mkdtemp(prefix="gmb-v2-test-"))
@@ -35,6 +36,12 @@ shutil.copytree(PLUGIN_DIR, _pkg_dir, ignore=shutil.ignore_patterns("__pycache__
 sys.path.insert(0, str(_pkg_root))
 
 import gcp_memory_bank_v2 as gmb  # noqa: E402
+
+_hermes_agent_dir = _os.environ.get("HERMES_AGENT_DIR")
+if _hermes_agent_dir:
+    HERMES_AGENT_DIR = Path(_hermes_agent_dir).resolve()
+    if str(HERMES_AGENT_DIR) not in sys.path:
+        sys.path.insert(0, str(HERMES_AGENT_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +180,9 @@ class FakeClient:
 @pytest.fixture
 def hermes_home(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "festive-antenna-463514-m8")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "YOUR_PROJECT_ID")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "4938048007586185216")
+    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "YOUR_ENGINE_ID")
     return tmp_path
 
 
@@ -188,7 +195,7 @@ def provider(hermes_home: Path):
             session_id="20260428_session",
             hermes_home=str(hermes_home),
             agent_identity="hermes",
-            user_id="jithendra",
+            user_id="demo-user",
             platform="cli",
             agent_context="primary",
         )
@@ -215,23 +222,38 @@ class TestUserIdGuardrails:
     def test_telegram_chat_id_rejected(self, hermes_home):
         from gcp_memory_bank_v2.config import GmbConfig
         cfg = GmbConfig()
-        uid, warn = cfg.resolve_user_id("8405386815")  # raw Telegram chat id
+        uid, warn = cfg.resolve_user_id("1234567890")  # raw Telegram chat id
         assert uid == "hermes-user"
         assert warn and "Telegram chat id" in warn
 
     def test_real_username_passes(self, hermes_home):
         from gcp_memory_bank_v2.config import GmbConfig
         cfg = GmbConfig()
-        uid, warn = cfg.resolve_user_id("jithendra")
-        assert uid == "jithendra"
+        uid, warn = cfg.resolve_user_id("demo-user")
+        assert uid == "demo-user"
         assert warn is None
 
     def test_config_override_wins(self, hermes_home):
         from gcp_memory_bank_v2.config import GmbConfig
         cfg = GmbConfig()
         cfg.raw["user_id"] = "alice"
-        uid, _ = cfg.resolve_user_id("8405386815")
+        uid, _ = cfg.resolve_user_id("1234567890")
         assert uid == "alice"
+
+    def test_google_cloud_location_does_not_override_memory_region(self, hermes_home, monkeypatch):
+        from gcp_memory_bank_v2.config import load_config
+        monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+        monkeypatch.delenv("GCP_MEMORY_LOCATION", raising=False)
+        monkeypatch.delenv("GCP_LOCATION", raising=False)
+        cfg = load_config(str(hermes_home))
+        assert cfg.location == "us-central1"
+
+    def test_gcp_memory_location_override(self, hermes_home, monkeypatch):
+        from gcp_memory_bank_v2.config import load_config
+        monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+        monkeypatch.setenv("GCP_MEMORY_LOCATION", "europe-west4")
+        cfg = load_config(str(hermes_home))
+        assert cfg.location == "europe-west4"
 
 
 class TestScopeDriftDetection:
@@ -247,7 +269,7 @@ class TestScopeDriftDetection:
 class TestScopeSafetyAndFence:
     def test_default_scope(self, provider):
         p, _ = provider
-        assert p._scope == {"app_name": "hermes", "user_id": "jithendra"}
+        assert p._scope == {"app_name": "hermes", "user_id": "demo-user"}
 
     def test_star_rejected(self):
         from gcp_memory_bank_v2.config import GmbConfig
@@ -392,6 +414,55 @@ class TestTools:
         assert out["result"]["sources"] == 2
 
 
+class TestMemoryManagerE2E:
+    def test_docs_pattern_lifecycle_and_tool_routing(self, hermes_home):
+        old_tools = sys.modules.pop("tools", None)
+        old_registry = sys.modules.pop("tools.registry", None)
+        tools_pkg = types.ModuleType("tools")
+        tools_pkg.__path__ = []
+        registry_mod = types.ModuleType("tools.registry")
+        registry_mod.tool_error = lambda msg: json.dumps({"error": msg})
+        sys.modules["tools"] = tools_pkg
+        sys.modules["tools.registry"] = registry_mod
+        try:
+            from agent.memory_manager import MemoryManager
+        finally:
+            if old_tools is not None:
+                sys.modules["tools"] = old_tools
+            else:
+                sys.modules.pop("tools", None)
+            if old_registry is not None:
+                sys.modules["tools.registry"] = old_registry
+            else:
+                sys.modules.pop("tools.registry", None)
+
+        fake = FakeClient()
+        with patch.object(gmb, "MemoryBankClient", return_value=fake):
+            provider = gmb.GcpMemoryBankProvider()
+            mgr = MemoryManager()
+            mgr.add_provider(provider)
+            mgr.initialize_all(
+                session_id="test-1",
+                platform="cli",
+                hermes_home=str(hermes_home),
+                user_id="demo-user",
+            )
+
+            assert mgr.has_tool("memory_store")
+            result = json.loads(mgr.handle_tool_call("memory_store", {"fact": "E2E memory"}))
+            assert result["result"]["status"] == "stored"
+            assert any(c["op"] == "create_memory" for c in fake.calls)
+
+            mgr.sync_all("user msg", "assistant msg", session_id="test-1")
+            time.sleep(0.2)
+            assert any(c["op"] == "create_session" for c in fake.calls)
+            assert any(c["op"] == "append_event" for c in fake.calls)
+
+            mgr.on_session_end([{"role": "user", "content": "bye"}])
+            mgr.shutdown_all()
+            assert any(c["op"] == "close" for c in fake.calls)
+
+
 # ---------------------------------------------------------------------------
 # sync_turn / lifecycle
 # ---------------------------------------------------------------------------
@@ -418,12 +489,12 @@ class TestSyncTurnAndSessions:
             "projects/p/locations/us/reasoningEngines/test/sessions/s1",
             "projects/p/locations/us/reasoningEngines/test/sessions/s2",
         ])
-        filtered = p._client.list_sessions(user_id="jithendra")
+        filtered = p._client.list_sessions(user_id="demo-user")
         all_sessions = p._client.list_sessions()
         assert len(all_sessions) == 2
         assert len(filtered) == 2
         assert any(c["op"] == "list_sessions" and c.get("user_id") is None for c in fake.calls)
-        assert all(s.get("user_id") == "jithendra" or s.get("user_id") is None for s in filtered)
+        assert all(s.get("user_id") == "demo-user" or s.get("user_id") is None for s in filtered)
 
     def test_client_close_calls_transport_close(self):
         from gcp_memory_bank_v2.client import MemoryBankClient
@@ -526,6 +597,18 @@ class TestTopicsBuild:
         assert ttls["create_ttl"] == f"{90 * 86400}s"
         assert ttls["generate_created_ttl"] == f"{180 * 86400}s"
 
+    def test_rest_fallback_payload_uses_camel_case(self):
+        from gcp_memory_bank_v2.client import _snake_to_camel
+        assert _snake_to_camel({
+            "generation_config": {"model": "m"},
+            "similarity_search_config": {"embedding_model": "e"},
+            "ttl_config": {"granular_ttl_config": {"create_ttl": "1s"}},
+        }) == {
+            "generationConfig": {"model": "m"},
+            "similaritySearchConfig": {"embeddingModel": "e"},
+            "ttlConfig": {"granularTtlConfig": {"createTtl": "1s"}},
+        }
+
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -535,7 +618,7 @@ class TestSystemPrompt:
         p, _ = provider
         block = p.system_prompt_block()
         assert "GCP Memory Bank" in block
-        assert "user_id=jithendra" in block
+        assert "user_id=demo-user" in block
         assert "memory_search" in block
         assert "<gcp-mb-context>" in block
 
@@ -704,3 +787,71 @@ class TestThrottleRetry:
         result = _retry(flaky, attempts=3)
         assert result == "ok"
         assert attempts["n"] == 2
+
+
+class TestCli:
+    def _run_cli(self, argv: List[str]) -> int:
+        import argparse
+        from gcp_memory_bank_v2 import cli
+
+        parser = argparse.ArgumentParser()
+        cli.register_cli(parser)
+        args = parser.parse_args(argv)
+        return int(args.func(args) or 0)
+
+    def test_package_import_exposes_config_helpers(self):
+        from gcp_memory_bank_v2 import cli
+
+        assert callable(cli.load_config)
+        assert callable(cli.save_config_file)
+        assert cli.CONFIG_FILENAME == "gcp-memory-bank.json"
+
+    def test_config_set_writes_target_profile_home(self, tmp_path, monkeypatch, capsys):
+        from gcp_memory_bank_v2 import cli
+
+        target_home = tmp_path / "profiles" / "research"
+        monkeypatch.setattr(cli, "_resolve_profile_home", lambda name: str(target_home))
+        try:
+            rc = self._run_cli(["--target-profile", "research", "config", "set", "user_id", "alice"])
+            assert rc == 0
+            data = json.loads((target_home / "gcp-memory-bank.json").read_text())
+            assert data["user_id"] == "alice"
+            assert "saved user_id" in capsys.readouterr().out
+        finally:
+            cli._profile_override = None
+
+    def test_config_set_accepts_key_value_and_unset(self, tmp_path, monkeypatch):
+        from gcp_memory_bank_v2 import cli
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        try:
+            assert self._run_cli(["config", "set", "scope_template.workspace={workspace}"]) == 0
+            data = json.loads((tmp_path / "gcp-memory-bank.json").read_text())
+            assert data["scope_template"]["workspace"] == "{workspace}"
+
+            assert self._run_cli(["config", "unset", "scope_template.workspace"]) == 0
+            data = json.loads((tmp_path / "gcp-memory-bank.json").read_text())
+            assert "workspace" not in data["scope_template"]
+        finally:
+            cli._profile_override = None
+
+    def test_status_prints_profile_and_config_path(self, tmp_path, monkeypatch, capsys):
+        from gcp_memory_bank_v2 import cli
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.delenv("GCP_PROJECT_ID", raising=False)
+        monkeypatch.delenv("GCP_MEMORY_ENGINE", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", raising=False)
+        (tmp_path / "gcp-memory-bank.json").write_text(json.dumps({
+            "project_id": "p",
+            "engine_id": "e",
+        }))
+        try:
+            assert self._run_cli(["status"]) == 0
+            out = capsys.readouterr().out
+            assert "Profile:" in out
+            assert f"Config:   {tmp_path / 'gcp-memory-bank.json'}" in out
+            assert "Project:  p" in out
+        finally:
+            cli._profile_override = None

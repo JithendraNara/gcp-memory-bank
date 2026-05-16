@@ -55,7 +55,7 @@ client.agent_engines.memories.generate(
 # CORRECT (current SDK)
 op = client.agent_engines.sessions.create(
     name=engine_name,        # NOT "parent"
-    user_id="jithendra",     # Required
+    user_id="demo-user",     # Required
     config={
         "display_name": "...",
         "ttl": "86400s",     # Minimum 24h
@@ -87,7 +87,7 @@ client.agent_engines.sessions.events.append(
 client.agent_engines.memories.generate(
     name=engine_name,
     vertex_session_source={"session": session_name},  # NOT {"name": ...}
-    scope={"app_name": "hermes", "user_id": "jithendra"},
+    scope={"app_name": "hermes", "user_id": "demo-user"},
     config={"wait_for_completion": False},
 )
 ```

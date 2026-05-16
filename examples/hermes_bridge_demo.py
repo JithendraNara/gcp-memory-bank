@@ -16,14 +16,14 @@ async def main() -> None:
     bridge = HermesBridgeExample()
 
     # 1. Session start: retrieve context
-    context = await bridge.on_session_start("jithendra")
+    context = await bridge.on_session_start("demo-user")
     print("=== System Prompt Augmentation ===")
     print(context)
     print()
 
     # 2. During session: agent stores a fact
     await bridge.on_agent_fact(
-        "jithendra",
+        "demo-user",
         "User prefers gemini-3.1-pro-preview for reasoning tasks.",
     )
     print("=== Fact stored ===")
@@ -38,11 +38,11 @@ async def main() -> None:
     ]
 
     print("=== Session-end memory generation ===")
-    await bridge.on_session_end("jithendra", session_events)
+    await bridge.on_session_end("demo-user", session_events)
 
     # 4. Recall
     print("\n=== Recall: deployment preferences ===")
-    results = await bridge.recall("jithendra", "deployment region preference")
+    results = await bridge.recall("demo-user", "deployment region preference")
     for r in results:
         print(f"  - {r['fact']}")
 

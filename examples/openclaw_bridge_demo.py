@@ -15,23 +15,23 @@ async def main() -> None:
 
     # User sets preferences
     await bridge.on_agent_fact(
-        "jithendra",
+        "demo-user",
         "Primary model: google/gemini-3.1-pro-preview. Fallback: minimax/custom-minimax.",
     )
     await bridge.on_agent_fact(
-        "jithendra",
+        "demo-user",
         "Prefer direct, no-fluff responses. Max tokens: 4096.",
     )
 
     # Session start: OpenClaw loads preferences
-    context = await bridge.on_session_start("jithendra")
+    context = await bridge.on_session_start("demo-user")
     print("=== Gateway Context ===")
     print(context)
     print()
 
     # Recall specific preference
     print("=== Recall: model preference ===")
-    results = await bridge.recall("jithendra", "preferred model")
+    results = await bridge.recall("demo-user", "preferred model")
     for r in results:
         print(f"  - {r['fact']}")
 

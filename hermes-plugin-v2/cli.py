@@ -3,6 +3,7 @@
     hermes gcp-memory-bank status
     hermes gcp-memory-bank doctor
     hermes gcp-memory-bank scope             [--set k=tmpl ...]
+    hermes gcp-memory-bank config path / show / set / unset
     hermes gcp-memory-bank scope-migrate     [--from-user X --to-user Y]
     hermes gcp-memory-bank instance describe / create / update-config
     hermes gcp-memory-bank topics list
@@ -22,20 +23,68 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
+
+
+_profile_override: Optional[str] = None
 
 
 def _hermes_home() -> str:
+    if _profile_override:
+        return _resolve_profile_home(_profile_override)
     return os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
 
 
+def _resolve_profile_home(profile_name: str) -> str:
+    try:
+        from hermes_cli.profiles import resolve_profile_env
+        return resolve_profile_env(profile_name)
+    except ImportError:
+        canon = str(profile_name or "").strip().lower()
+        if canon in ("", "default"):
+            return str(Path.home() / ".hermes")
+        return str(Path.home() / ".hermes" / "profiles" / canon)
+
+
+def _active_profile_name() -> str:
+    if _profile_override:
+        return _profile_override
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name()
+    except Exception:
+        return "custom" if os.environ.get("HERMES_HOME") else "default"
+
+
+def _config_file_path(hermes_home: Optional[str] = None) -> Path:
+    return Path(hermes_home or _hermes_home()) / CONFIG_FILENAME
+
+
+def _read_config_file(hermes_home: Optional[str] = None) -> Dict[str, Any]:
+    path = _config_file_path(hermes_home)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_config_file(values: Dict[str, Any], hermes_home: Optional[str] = None) -> None:
+    path = _config_file_path(hermes_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 if __package__:
-    from .client import MemoryBankClient
+    from .client import MemoryBankClient, _to_dict as _client_to_dict
+    from .config import CONFIG_FILENAME, load_config, save_config_file
+    from .retrieval import is_pollution
     from .topics import DEFAULT_CUSTOM_TOPICS, MANAGED_TOPICS, build_memory_bank_config
-    from .client import _to_dict as _client_to_dict
 else:  # pragma: no cover - pytest / flat import compatibility
     from client import MemoryBankClient, _to_dict as _client_to_dict
-    from config import load_config, save_config_file
+    from config import CONFIG_FILENAME, load_config, save_config_file
     from retrieval import is_pollution
     from topics import DEFAULT_CUSTOM_TOPICS, MANAGED_TOPICS, build_memory_bank_config
 
@@ -61,12 +110,90 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _redact_config(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        redacted = {}
+        for key, value in obj.items():
+            lowered = str(key).lower()
+            if any(marker in lowered for marker in ("secret", "password", "api_key", "apikey")):
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_config(value)
+        return redacted
+    if isinstance(obj, list):
+        return [_redact_config(item) for item in obj]
+    return obj
+
+
+def _coerce_config_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _config_key_parts(key: str) -> List[str]:
+    parts = [part.strip() for part in str(key or "").split(".") if part.strip()]
+    if not parts:
+        raise ValueError("config key cannot be empty")
+    return parts
+
+
+def _set_config_key(data: Dict[str, Any], key: str, value: Any) -> None:
+    parts = _config_key_parts(key)
+    target: Dict[str, Any] = data
+    for part in parts[:-1]:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            target[part] = child
+        target = child
+    target[parts[-1]] = value
+
+
+def _unset_config_key(data: Dict[str, Any], key: str) -> bool:
+    parts = _config_key_parts(key)
+    target: Dict[str, Any] = data
+    for part in parts[:-1]:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            return False
+        target = child
+    return target.pop(parts[-1], None) is not None
+
+
+def _iter_profile_homes() -> Iterable[tuple[str, str]]:
+    try:
+        from hermes_cli.profiles import list_profiles
+        for info in list_profiles():
+            yield str(info.name), str(info.path)
+        return
+    except Exception:
+        pass
+    yield _active_profile_name(), _hermes_home()
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 def _cmd_status(args: argparse.Namespace) -> int:
+    if getattr(args, "all", False):
+        active = _active_profile_name()
+        for name, home in _iter_profile_homes():
+            raw = _read_config_file(home)
+            cfg = load_config(home)
+            marker = "*" if name == active else "-"
+            print(f"{marker} {name}")
+            print(f"  Home:    {home}")
+            print(f"  Config:  {_config_file_path(home)} ({'present' if raw else 'missing'})")
+            print(f"  Project: {cfg.project or '(unset)'}")
+            print(f"  Engine:  {cfg.engine_id or '(unset)'}")
+        return 0
+
     cfg = load_config(_hermes_home())
     print("Provider: gcp-memory-bank v2")
+    print(f"Profile:  {_active_profile_name()}")
+    print(f"Config:   {_config_file_path()}")
     print(f"Project:  {cfg.project or '(unset)'}")
     print(f"Location: {cfg.location}")
     print(f"Engine:   {cfg.engine_id or '(unset)'}")
@@ -75,6 +202,42 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"Sessions: {'enabled' if cfg.raw.get('use_gcp_sessions') else 'disabled'}")
     print(f"Mid-session generate: every {cfg.raw.get('generate_every_n_turns')} turns")
     print(f"Models:   gen={cfg.raw.get('generation_model')}  emb={cfg.raw.get('embedding_model')}  syn={cfg.raw.get('synthesis_model')}")
+    return 0
+
+
+def _cmd_config_path(args: argparse.Namespace) -> int:
+    print(_config_file_path())
+    return 0
+
+
+def _cmd_config_show(args: argparse.Namespace) -> int:
+    data = load_config(_hermes_home()).raw if args.effective else _read_config_file()
+    if not args.no_redact:
+        data = _redact_config(data)
+    _print_json(data)
+    return 0
+
+
+def _cmd_config_set(args: argparse.Namespace) -> int:
+    key = args.key
+    value = args.value
+    if value is None and "=" in key:
+        key, value = key.split("=", 1)
+    if value is None:
+        print("error: config set expects KEY VALUE or KEY=VALUE", file=sys.stderr)
+        return 2
+    data = _read_config_file()
+    _set_config_key(data, key, _coerce_config_value(value))
+    _write_config_file(data)
+    print(f"saved {key} in {_config_file_path()}")
+    return 0
+
+
+def _cmd_config_unset(args: argparse.Namespace) -> int:
+    data = _read_config_file()
+    removed = _unset_config_key(data, args.key)
+    _write_config_file(data)
+    print(f"{'removed' if removed else 'missing'} {args.key} in {_config_file_path()}")
     return 0
 
 
@@ -386,7 +549,7 @@ def _cmd_sessions_delete(args: argparse.Namespace) -> int:
 def _cmd_sessions_clean(args: argparse.Namespace) -> int:
     """Delete all sessions on the engine EXCEPT the one currently persisted
     for cross-process reuse. Recovers from the v1 leak (we found 40 sessions
-    on engine 4938048007586185216 on 2026-04-29)."""
+    on engine YOUR_ENGINE_ID on 2026-04-29)."""
     client, _ = _build_client()
     if client is None:
         return 1
@@ -482,19 +645,53 @@ def _to_dict(obj: Any) -> Any:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
+    global _profile_override
+    _profile_override = getattr(args, "target_profile", None)
     handler = getattr(args, "_handler", None)
     if handler is None:
         print("Usage: hermes gcp-memory-bank <subcommand>", file=sys.stderr)
         return 2
-    return int(handler(args) or 0)
+    try:
+        return int(handler(args) or 0)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace) -> None:
+    rc = _dispatch(args)
+    if rc:
+        raise SystemExit(rc)
 
 
 def register_cli(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--target-profile", metavar="NAME", dest="target_profile",
+        help="Target a specific Hermes profile's GCP Memory Bank config",
+    )
     sub = subparser.add_subparsers(dest="gmb_command")
 
-    p = sub.add_parser("status"); p.set_defaults(_handler=_cmd_status)
+    p = sub.add_parser("status")
+    p.add_argument("--all", action="store_true", help="Show config overview across all profiles")
+    p.set_defaults(_handler=_cmd_status)
     p = sub.add_parser("doctor"); p.set_defaults(_handler=_cmd_doctor)
     p = sub.add_parser("audit"); p.set_defaults(_handler=_cmd_audit)
+
+    cfg = sub.add_parser("config", help="Read or write profile-local gcp-memory-bank.json")
+    csub = cfg.add_subparsers(dest="config_command")
+    p = csub.add_parser("path", help="Print the active config path")
+    p.set_defaults(_handler=_cmd_config_path)
+    p = csub.add_parser("show", help="Show profile-local config JSON")
+    p.add_argument("--effective", action="store_true", help="Include defaults and env overrides")
+    p.add_argument("--no-redact", action="store_true", help="Do not redact secret-like keys")
+    p.set_defaults(_handler=_cmd_config_show)
+    p = csub.add_parser("set", help="Set a config value: KEY VALUE or KEY=VALUE")
+    p.add_argument("key")
+    p.add_argument("value", nargs="?")
+    p.set_defaults(_handler=_cmd_config_set)
+    p = csub.add_parser("unset", help="Remove a config key")
+    p.add_argument("key")
+    p.set_defaults(_handler=_cmd_config_unset)
 
     p = sub.add_parser("scope")
     p.add_argument("--set", dest="set_pairs", nargs="+", default=[],
@@ -546,4 +743,4 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     iam = sub.add_parser("iam"); iamsub = iam.add_subparsers(dest="iam_command")
     p = iamsub.add_parser("check"); p.set_defaults(_handler=_cmd_iam_check)
 
-    subparser.set_defaults(func=_dispatch)
+    subparser.set_defaults(func=_run)

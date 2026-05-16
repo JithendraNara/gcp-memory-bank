@@ -8,8 +8,8 @@ revision labels, observable background ops, REAL Gemini synthesis,
 configurable circuit breaker, scope drift detection, atexit session flush,
 strict agent_context gating).
 
-Backwards compatible with the existing engine ``4938048007586185216`` and
-the current 200+ memories under ``{app_name=hermes, user_id=jithendra}``.
+Backwards compatible with the existing engine ``YOUR_ENGINE_ID`` and
+the current 200+ memories under ``{app_name=hermes, user_id=demo-user}``.
 """
 
 from __future__ import annotations
@@ -188,20 +188,11 @@ class GcpMemoryBankProvider(MemoryProvider):
              "env_var": "GOOGLE_CLOUD_PROJECT"},
             {"key": "location", "description": "Vertex AI region", "default": "us-central1",
              "choices": ["us-central1", "us-east4", "europe-west4", "asia-northeast1"],
-             "env_var": "GOOGLE_CLOUD_LOCATION"},
+             "env_var": "GCP_MEMORY_LOCATION"},
             {"key": "engine_id", "description": "Agent Engine ID (auto-provisioned if blank)",
              "env_var": "GOOGLE_CLOUD_AGENT_ENGINE_ID"},
             {"key": "user_id", "description": "Canonical user identity for scoping. NEVER set to a chat id."},
             {"key": "app_name", "description": "Application name for scoping", "default": "hermes"},
-            {"key": "generation_model", "default": "gemini-3.1-pro-preview"},
-            {"key": "embedding_model", "default": "gemini-embedding-001"},
-            {"key": "synthesis_model", "default": "gemini-2.5-flash"},
-            {"key": "recall_mode", "default": "hybrid", "choices": ["context", "tools", "hybrid"]},
-            {"key": "recall_budget", "default": "mid", "choices": ["low", "mid", "high"]},
-            {"key": "generate_every_n_turns", "default": 3,
-             "description": "Mid-session memory generation cadence (0 = only at session end)."},
-            {"key": "use_gcp_sessions", "default": True},
-            {"key": "auto_prefetch", "default": True},
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -338,6 +329,15 @@ class GcpMemoryBankProvider(MemoryProvider):
             except Exception:
                 pass
         self._client = None
+
+    def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
+        """Accept Hermes turn-start runtime context.
+
+        Scope and write-gating are resolved at initialize time; this hook is
+        intentionally lightweight so the plugin.yaml hook declaration stays
+        truthful without adding per-turn latency.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # System prompt + tool schemas

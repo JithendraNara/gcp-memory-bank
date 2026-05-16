@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, "/Users/jithendranara/.hermes/hermes-agent")
+if os.environ.get("HERMES_AGENT_DIR"):
+    sys.path.insert(0, os.environ["HERMES_AGENT_DIR"])
 
 from plugins.memory import load_memory_provider
 
@@ -79,7 +81,7 @@ def backfill(
             # Skip system notes, image descriptions, code, URLs-only
             skip_prefixes = (
                 "[system note:", "[the user sent an image", "http", "https://",
-                "/users/", "> ##", "```", "curl ", "jithendranara@",
+                "/users/", "> ##", "```", "curl ", "user.com",
             )
             if any(msg.strip().lower().startswith(p) for p in skip_prefixes):
                 continue
@@ -148,7 +150,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill Hermes memories into GCP Memory Bank")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be stored without storing")
     parser.add_argument("--limit", type=int, default=None, help="Max messages to scan")
-    parser.add_argument("--user-id", default="jithendra", help="User ID for scope")
+    parser.add_argument("--user-id", default="demo-user", help="User ID for scope")
     parser.add_argument("--app-name", default="hermes", help="App name for scope")
     parser.add_argument("--structured-only", action="store_true", help="Only store structured facts, skip raw fallbacks")
     args = parser.parse_args()
